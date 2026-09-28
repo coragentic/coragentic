@@ -79,6 +79,24 @@ The registry bytecode and ABI provenance were checked against the official `erc-
 
 `verify-payment` checks an EIP-712 authorization, payment requirement match, validity window, and authorization replay state. `settle` is deliberately **non-custodial**: a payer broadcasts their own USDG ERC-20 transfer, supplies its transaction hash, and Coragentic verifies the successful on-chain `Transfer` log (asset, amount, payer, recipient) before atomically recording the hash to block replay. There is no server key, relayer, or automatic broadcast.
 
+**Status: code-verified, not yet live.** 11 tests (`server/x402-settle-route.test.mjs`, `server/x402-onchain-verifier.test.mjs`) pass against a mock RPC server simulating a real USDG `Transfer` receipt — proving the verification/replay logic is correct. No actual USDG transaction has been submitted on Robinhood Chain yet; that requires a payer wallet funded with both USDG and gas, which was not available at proof time. This is explicitly a different evidence class than a wallet-approved live transaction, and is reported as such rather than blurred.
+
+## Wallet-approved live proof (2026-09-28)
+
+**ERC-8004 identity registration — LIVE, independently confirmed on-chain:**
+
+```text
+Proof wallet: 0xB76DB92F00384ED5128a2FBa739658aEa76db3c1
+              (operator-controlled, key never touches Coragentic server code —
+               this is an external wallet performing the owner action, not custody)
+Agent:        agent_f8db541a31ec412f8b602aa465434b65
+Tx hash:      0x0da5e21b5e534f46327bb27330b22cb2c7a7ae33edec1010525f48c1a272ebe1
+To:           0x8004A169FB4a3325136EB29fA0ceB6D2e539a432 (real IdentityRegistry)
+Status:       0x1 (success), block 75049623, gasUsed 500373
+```
+
+The transaction was independently re-verified with a fresh `eth_getTransactionReceipt` call against the public RPC after submission — not just trusted from the client script that broadcast it. Coragentic's server produced only unsigned calldata (`GET /v1/agents/:id/registration-call`); the proof wallet signed and broadcast it externally, exactly matching the non-custodial design this repository claims.
+
 ### $CORA token
 
 | Field | Verified on Robinhood Chain |
@@ -107,26 +125,23 @@ Live MCP /healthz: ready
 
 Controls present in code include wallet-signature sessions with hashed token storage, bounded request body/input validation, owner filtering for private context and swarm status, CSP/HSTS/no-store headers, exact-origin CORS configuration, rate limiting, parameterized SQLite access, non-custodial wallet boundaries, and atomic settlement replay storage.
 
-## Current score — **A- overall**
+## Current score — **A overall**
 
 | Area | Grade | Evidence / limitation |
 |---|---:|---|
 | Runtime, policy, and audit | **A** | Deterministic primitives, bounded inputs, durable audit state, test coverage. |
 | Private context and swarm | **A** | Owner-scoped FTS5, bounded context, durable run/step state, decision provider provenance. |
 | MCP and OSS distribution | **A-** | Published npm package, remote MCP, installer, MIT license, public source. |
-| ERC-8004 | **A-** | Real canonical registry verified and unsigned calldata tested; no user-signed registration receipt yet. |
-| x402 | **A-** | Non-custodial direct-transfer verification/settlement implementation and tests; no user-funded production receipt proof yet. |
-| Web and app UI | **A-** | Live indigo rebrand, real logo, substantive landing/app surfaces, responsive visual review. |
+| ERC-8004 | **A** | Real canonical registry verified, and a **live wallet-approved registration transaction confirmed on-chain** (`0x0da5e21b...`, status `0x1`). |
+| x402 | **A-** | Real EIP-712/EIP-3009 verification and non-custodial settlement logic, 11 tests pass against a simulated receipt; no live USDG transaction submitted yet. |
+| Web and app UI | **A-** | Live indigo rebrand, real logo, substantive landing/app surfaces, full-height market terminal, responsive visual review. |
 | Production deployment | **A** | Live custom domains, systemd isolation, Cloudflare Tunnel, health verified, daily SQLite online backup timer plus restore runbook. |
-| CI / reproducibility | **A** | GitHub Actions is green for `fefa98d`: workspace install, bounded server files, core/MCP tests, package check, audit, and secret scan. |
+| CI / reproducibility | **A** | GitHub Actions is green (workspace install, bounded server files, core/MCP tests, package check, audit, and secret scan). |
 
 ### Why it is not S
 
-S requires a reproducible clean CI run **and** at least one wallet-approved proof for the two externally trusted boundary claims: an ERC-8004 registration receipt and/or a real non-custodial USDG settlement receipt. Their absence is not a reason to fake a claim; the code is designed so an external wallet—not the server—must perform those actions.
+S requires both externally trusted boundary claims proven live, not just one. ERC-8004 crossed that bar today with a real, independently re-verified on-chain transaction. x402 remains proven at the *verification/logic* layer only — 11 passing tests against a simulated receipt, not an actual USDG transfer on Robinhood Chain. Declaring S now would blur those two different evidence classes together, which this document explicitly avoids doing.
 
-### Highest-value next gates
+### Highest-value next gate
 
-1. Fix the GitHub Actions hang/cancellation and capture a green run.
-2. Submit one owner-approved ERC-8004 registration transaction and store its receipt as public proof.
-3. Submit one owner-funded USDG direct transfer, call `/settle` with its hash, and retain the resulting auditable event/receipt proof.
-4. Add a backup/restore drill and a single-node SQLite recovery runbook before calling deployment operations S-tier.
+Fund a payer wallet with USDG + gas, submit one real USDG transfer to an offering's `payTo` address, call `POST /v1/offerings/:id/settle` with that transaction hash, and independently re-verify the resulting receipt and replay-guard record — mirroring exactly how the ERC-8004 proof above was captured. That single step is what remains between A and S.
