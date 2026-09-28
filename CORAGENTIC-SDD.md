@@ -98,6 +98,7 @@ These are direct ERC-20 RPC reads (`eth_getCode`, `name()`, `symbol()`, `decimal
 Server tests: 94 passed
 Core tests:   10 passed
 MCP tests:     7 passed
+GitHub Actions: green for commit `fefa98d` (workspace install, bounded server tests, core/MCP tests, pack check, audit, and secret scan)
 npm audit --omit=dev --audit-level=high: 0 vulnerabilities
 Frontend production build: passed
 Live API /health: 200
@@ -106,7 +107,7 @@ Live MCP /healthz: ready
 
 Controls present in code include wallet-signature sessions with hashed token storage, bounded request body/input validation, owner filtering for private context and swarm status, CSP/HSTS/no-store headers, exact-origin CORS configuration, rate limiting, parameterized SQLite access, non-custodial wallet boundaries, and atomic settlement replay storage.
 
-## Current score — **B+ overall**
+## Current score — **A- overall**
 
 | Area | Grade | Evidence / limitation |
 |---|---:|---|
@@ -116,8 +117,8 @@ Controls present in code include wallet-signature sessions with hashed token sto
 | ERC-8004 | **A-** | Real canonical registry verified and unsigned calldata tested; no user-signed registration receipt yet. |
 | x402 | **A-** | Non-custodial direct-transfer verification/settlement implementation and tests; no user-funded production receipt proof yet. |
 | Web and app UI | **A-** | Live indigo rebrand, real logo, substantive landing/app surfaces, responsive visual review. |
-| Production deployment | **A-** | Live custom domains, systemd isolation, Cloudflare Tunnel, health verified. |
-| CI / reproducibility | **C** | GitHub Actions runs are currently cancelling/stalling during the server test step; a clean remote green run is not yet evidenced. |
+| Production deployment | **A** | Live custom domains, systemd isolation, Cloudflare Tunnel, health verified, daily SQLite online backup timer plus restore runbook. |
+| CI / reproducibility | **A** | GitHub Actions is green for `fefa98d`: workspace install, bounded server files, core/MCP tests, package check, audit, and secret scan. |
 
 ### Why it is not S
 
