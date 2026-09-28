@@ -18,8 +18,18 @@ jobs:
           node-version: 26
           cache: npm
       - run: npm ci
-      - name: Server tests, core tests/typecheck, MCP tests
-        run: npm test
+      - name: Server tests (isolated files, bounded)
+        run: |
+          set -euo pipefail
+          for file in server/*.test.mjs; do
+            echo "::group::$file"
+            timeout 45s node --test --test-force-exit --test-timeout=30000 "$file"
+            echo "::endgroup::"
+          done
+      - name: Core tests and typecheck
+        run: npm run test --prefix packages/core
+      - name: MCP tests
+        run: npm test --prefix packages/mcp
       - name: MCP package check
         run: npm run pack:check
       - name: Dependency audit
