@@ -31,7 +31,7 @@
     "server.json"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test --test-force-exit --test-timeout=30000 test/*.test.mjs",
     "pack:check": "npm pack --dry-run"
   },
   "dependencies": {
