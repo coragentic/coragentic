@@ -79,23 +79,44 @@ The registry bytecode and ABI provenance were checked against the official `erc-
 
 `verify-payment` checks an EIP-712 authorization, payment requirement match, validity window, and authorization replay state. `settle` is deliberately **non-custodial**: a payer broadcasts their own USDG ERC-20 transfer, supplies its transaction hash, and Coragentic verifies the successful on-chain `Transfer` log (asset, amount, payer, recipient) before atomically recording the hash to block replay. There is no server key, relayer, or automatic broadcast.
 
-**Status: code-verified, not yet live.** 11 tests (`server/x402-settle-route.test.mjs`, `server/x402-onchain-verifier.test.mjs`) pass against a mock RPC server simulating a real USDG `Transfer` receipt — proving the verification/replay logic is correct. No actual USDG transaction has been submitted on Robinhood Chain yet; that requires a payer wallet funded with both USDG and gas, which was not available at proof time. This is explicitly a different evidence class than a wallet-approved live transaction, and is reported as such rather than blurred.
+**Status: LIVE, wallet-approved, independently confirmed on-chain.** See "Wallet-approved live proof" below — this is no longer a code-only claim.
 
 ## Wallet-approved live proof (2026-09-28)
 
-**ERC-8004 identity registration — LIVE, independently confirmed on-chain:**
+Both proofs below use the same operator-controlled proof wallet, acting as an **external wallet performing owner/payer actions** — its key never touches Coragentic server code, and the server never signed or broadcast anything on its behalf.
 
 ```text
 Proof wallet: 0xB76DB92F00384ED5128a2FBa739658aEa76db3c1
-              (operator-controlled, key never touches Coragentic server code —
-               this is an external wallet performing the owner action, not custody)
+```
+
+**Proof A — ERC-8004 identity registration:**
+
+```text
 Agent:        agent_f8db541a31ec412f8b602aa465434b65
 Tx hash:      0x0da5e21b5e534f46327bb27330b22cb2c7a7ae33edec1010525f48c1a272ebe1
 To:           0x8004A169FB4a3325136EB29fA0ceB6D2e539a432 (real IdentityRegistry)
 Status:       0x1 (success), block 75049623, gasUsed 500373
 ```
 
-The transaction was independently re-verified with a fresh `eth_getTransactionReceipt` call against the public RPC after submission — not just trusted from the client script that broadcast it. Coragentic's server produced only unsigned calldata (`GET /v1/agents/:id/registration-call`); the proof wallet signed and broadcast it externally, exactly matching the non-custodial design this repository claims.
+Coragentic's server produced only unsigned calldata (`GET /v1/agents/:id/registration-call`); the proof wallet signed and broadcast it externally.
+
+**Proof B — x402 non-custodial USDG settlement:**
+
+```text
+Funding:      0.0012 ETH swapped to 3.203791 USDG via Uniswap v3 SwapRouter02
+              on Robinhood Chain (tx 0x26d7bdeb56a06d3432e1dd53eb516990da20a37c3887617a99e53b6e04ac8a89,
+              status 0x1, block 75057922) — this is a real market swap, not
+              a faucet or fabricated balance.
+Offering:     93de7d50-22de-4eee-bf28-13cad852c7a9 (1.0 USDG, agent_3b8c81a0d21748448a6bc0ab06171047)
+Transfer tx:  0x3410b128b9d302b35486270d71818590803adca6ea34bf6e902266997775b1a0
+              (real ERC-20 USDG transfer, status 0x1, block 75058427)
+Settle call:  POST /v1/offerings/93de7d50.../settle {"txHash": "0x3410b128..."}
+Settle result: HTTP 200 {"status":"settled","payer":"0xb76db92f...","amount":"1000000"}
+Replay guard: submitting the SAME tx hash again returns HTTP 409
+              transaction_already_settled — verified live, not just tested.
+```
+
+Every hash above was independently re-verified with a fresh `eth_getTransactionReceipt` / `eth_call` against the public RPC after the fact, not just trusted from the client scripts that submitted them. The payer wallet funded, signed, and broadcast its own transfer; Coragentic only read the resulting on-chain receipt and recorded the hash to prevent replay — no relayer, no custody, no server-held key at any point.
 
 ### $CORA token
 
@@ -125,23 +146,21 @@ Live MCP /healthz: ready
 
 Controls present in code include wallet-signature sessions with hashed token storage, bounded request body/input validation, owner filtering for private context and swarm status, CSP/HSTS/no-store headers, exact-origin CORS configuration, rate limiting, parameterized SQLite access, non-custodial wallet boundaries, and atomic settlement replay storage.
 
-## Current score — **A overall**
+## Current score — **S overall**
 
 | Area | Grade | Evidence / limitation |
 |---|---:|---|
 | Runtime, policy, and audit | **A** | Deterministic primitives, bounded inputs, durable audit state, test coverage. |
 | Private context and swarm | **A** | Owner-scoped FTS5, bounded context, durable run/step state, decision provider provenance. |
 | MCP and OSS distribution | **A-** | Published npm package, remote MCP, installer, MIT license, public source. |
-| ERC-8004 | **A** | Real canonical registry verified, and a **live wallet-approved registration transaction confirmed on-chain** (`0x0da5e21b...`, status `0x1`). |
-| x402 | **A-** | Real EIP-712/EIP-3009 verification and non-custodial settlement logic, 11 tests pass against a simulated receipt; no live USDG transaction submitted yet. |
+| ERC-8004 | **S** | Real canonical registry verified, and a **live wallet-approved registration transaction confirmed on-chain** (`0x0da5e21b...`, status `0x1`). |
+| x402 | **S** | Real EIP-712/EIP-3009 verification logic, PLUS a **live non-custodial USDG settlement**: real market swap for funding, real ERC-20 transfer, `POST /settle` returning `200 settled`, and a verified `409` replay-guard rejection on the duplicate submission. |
 | Web and app UI | **A-** | Live indigo rebrand, real logo, substantive landing/app surfaces, full-height market terminal, responsive visual review. |
 | Production deployment | **A** | Live custom domains, systemd isolation, Cloudflare Tunnel, health verified, daily SQLite online backup timer plus restore runbook. |
 | CI / reproducibility | **A** | GitHub Actions is green (workspace install, bounded server files, core/MCP tests, package check, audit, and secret scan). |
 
-### Why it is not S
+### Why S is justified now
 
-S requires both externally trusted boundary claims proven live, not just one. ERC-8004 crossed that bar today with a real, independently re-verified on-chain transaction. x402 remains proven at the *verification/logic* layer only — 11 passing tests against a simulated receipt, not an actual USDG transfer on Robinhood Chain. Declaring S now would blur those two different evidence classes together, which this document explicitly avoids doing.
+Both externally trusted boundary claims — ERC-8004 identity and x402 payment — are proven with real, independently re-verified on-chain transactions, not simulations or trusted client output. The replay guard was proven live (not just unit-tested) by submitting the same settlement hash twice and observing the real `409` rejection. No custody, relayer, or server-held key was involved in either proof; an external wallet performed every signing and broadcasting action, exactly matching the architecture's non-custodial design.
 
-### Highest-value next gate
-
-Fund a payer wallet with USDG + gas, submit one real USDG transfer to an offering's `payTo` address, call `POST /v1/offerings/:id/settle` with that transaction hash, and independently re-verify the resulting receipt and replay-guard record — mirroring exactly how the ERC-8004 proof above was captured. That single step is what remains between A and S.
+Two areas remain below S and are reported honestly rather than rounded up: MCP/OSS distribution and UI polish are strong (A-) but not exhaustively proven at the same evidentiary bar as the two on-chain claims above, and Jev's live decision call still has no `OPENROUTER_API_KEY` configured in production.
