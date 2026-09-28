@@ -87,6 +87,14 @@ export function openDatabase(path = process.env.CORAGENTIC_DB || 'data/coragenti
       UNIQUE(agent_id, memory_key)
     );
     CREATE INDEX IF NOT EXISTS idx_agent_memory_agent ON agent_memory(agent_id, updated_at);
+    CREATE TABLE IF NOT EXISTS x402_settlements (
+      tx_hash TEXT PRIMARY KEY,
+      offering_id TEXT NOT NULL REFERENCES offerings(id),
+      payer_wallet TEXT NOT NULL,
+      amount_atomic TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_x402_settlements_offering ON x402_settlements(offering_id);
   `);
   return db;
 }

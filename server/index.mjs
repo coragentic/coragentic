@@ -6,6 +6,7 @@ import { migrateWorkerSchema } from './worker.mjs';
 import { createRegistrationPayload, hashRegistrationPayload, registrationURI, buildRegisterCall, IDENTITY_REGISTRY_ADDRESS } from './identity.mjs';
 import { createPaymentRequired, createX402Boundary, parsePaymentSignature, NETWORK as X402_NETWORK } from './x402.mjs';
 import { createUsdgFacilitator } from './x402-facilitator.mjs';
+import { createDirectTransferFacilitator } from './x402-onchain-verifier.mjs';
 import { createRateLimiter, getCorsHeaders, getSecurityHeaders, formatPublicError } from './security.mjs';
 import { migrateRagSchema, indexMemory, recall as ragRecall } from './rag.mjs';
 import { buildAgentCard, buildMcpManifest } from './interoperability.mjs';
@@ -31,6 +32,7 @@ const requestLimiter = createRateLimiter({ limit: Number(process.env.RATE_LIMIT_
 const swarmDecisionAdapter = createOpenRouterJevAdapterFromEnv();
 const swarmDecisionProvider = process.env.OPENROUTER_API_KEY ? 'openrouter-jev-configured-with-offline-fallback' : 'offline';
 const usdgFacilitator = createUsdgFacilitator();
+const x402OnchainVerifier = createDirectTransferFacilitator();
 const x402Boundary = createX402Boundary({
   verify: (parsedPayment, requirement) => usdgFacilitator.verify(parsedPayment.payload.authorization, requirement),
 });
@@ -386,6 +388,35 @@ async function handle(req, res) {
     const result = await x402Boundary.verifyPayment(signature, requirement);
     const status = result.status === 'verified' ? 200 : result.status === 'unavailable' ? 503 : 402;
     return json(res, status, { ok: result.status === 'verified', data: result });
+  }
+  if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'offerings' && parts[2] && parts[3] === 'settle') {
+    const offering = db.prepare("SELECT * FROM offerings WHERE id = ? AND status = 'active'").get(parts[2]);
+    if (!offering) return json(res, 404, { ok: false, error: 'offering_not_found' });
+    const body = await readBody(req);
+    const txHash = typeof body.txHash === 'string' ? body.txHash : null;
+    if (!txHash) return json(res, 400, { ok: false, error: 'tx_hash_required' });
+    const requirement = createPaymentRequired({
+      amount: offering.price_atomic,
+      asset: offering.asset,
+      payTo: offering.owner_wallet,
+      resource: `/v1/offerings/${offering.id}/jobs`,
+      description: offering.description,
+    });
+    const result = await x402OnchainVerifier.verifyTransaction(txHash, requirement);
+    if (result.status !== 'verified') {
+      const status = result.status === 'unavailable' ? 503 : 402;
+      return json(res, status, { ok: false, data: result });
+    }
+    // Atomic replay guard: tx_hash is PRIMARY KEY, so a concurrent duplicate settle
+    // fails at the database layer, not via a check-then-act race in application code.
+    try {
+      db.prepare('INSERT INTO x402_settlements (tx_hash, offering_id, payer_wallet, amount_atomic, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(txHash, offering.id, result.payer, result.amount, new Date().toISOString());
+    } catch {
+      return json(res, 409, { ok: false, error: 'transaction_already_settled' });
+    }
+    audit(result.payer, 'offering', offering.id, 'x402_settled', { txHash, amount: result.amount });
+    return json(res, 200, { ok: true, data: { status: 'settled', txHash, payer: result.payer, amount: result.amount, offeringId: offering.id } });
   }
   if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'offerings' && parts[2] && parts[3] === 'jobs') {
     const wallet = sessionWallet(req);
