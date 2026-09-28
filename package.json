@@ -12,8 +12,7 @@
     "api": "node server/index.mjs",
     "api:dev": "node --watch server/index.mjs",
     "worker": "node server/worker-entry.mjs",
-    "test": "npm run test:server && npm run test --prefix packages/core && npm test --prefix packages/mcp",
-    "test:server": "for file in server/*.test.mjs; do node --test --test-force-exit --test-timeout=60000 \"$file\" || exit $?; done",
+    "test": "node --test --test-isolation=none --test-force-exit --test-timeout=60000 server/*.test.mjs && npm run test --prefix packages/core && npm test --prefix packages/mcp",
     "test:core": "node --test packages/core/test/runtime.test.mjs && node packages/core/examples/basic-agent.mjs",
     "pack:check": "npm run pack:check --prefix packages/mcp"
   },
