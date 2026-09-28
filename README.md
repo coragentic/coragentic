@@ -1,0 +1,115 @@
+# Coragentic
+
+Coragentic is a **self-hosted, local-first implementation reference** for wallet-owned agent drafts, deterministic tool-runtime primitives, SQLite-backed workflow state, and Robinhood Chain helpers (EIP-155 chain 4663). It also runs a hosted deployment at [coragentic.app](https://coragentic.app) with a live API (`api.coragentic.app`) and remote MCP endpoint (`mcp.coragentic.app`).
+
+It is a Vite/React frontend plus a Node HTTP server. The repository also contains public workspace packages for a provider-neutral runtime (`packages/core`) and a stdio + Streamable HTTP MCP adapter (`packages/mcp`, published as [`@coragentic/mcp`](https://www.npmjs.com/package/@coragentic/mcp) on npm).
+
+## Current state
+
+### Implemented in this checkout
+
+- Local SQLite storage at `data/coragentic.sqlite` by default (override with `CORAGENTIC_DB`).
+- Wallet challenge/signature sessions; only token hashes are stored.
+- Durable agent **drafts**, memory with SQLite FTS5 keyword retrieval, offerings/jobs, audit events, swarm state, and worker leases.
+- API health/network routes, A2A-style agent-card endpoints, MCP discovery manifest endpoints, and read-only market quote/swap-preview helpers.
+- Unsigned swap calldata previews; an external wallet must review, sign, and broadcast.
+- Deterministic core-runtime policy/allowlist primitives and a separate MCP server (stdio + Streamable HTTP).
+- **ERC-8004 Trustless Agents identity registry integration**: the deployed `IdentityRegistry` at `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` on Robinhood Chain is the same canonical singleton address used across every ERC-8004 chain. Its ABI is vendored from the official [`erc-8004/erc-8004-contracts`](https://github.com/erc-8004/erc-8004-contracts) repository and cross-checked against live `name()`/`symbol()` reads. `GET /v1/agents/:id/registration-call` returns unsigned `register(string)` calldata for the owner's external wallet to sign and broadcast; Coragentic never holds a private key or submits the transaction itself.
+- **x402 payment verification on Robinhood Chain**: `server/x402-facilitator.mjs` independently verifies EIP-3009 `transferWithAuthorization` payments in **USDG** (`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`), which implements EIP-3009. Verification recovers the real EIP-712 signature against the domain reproduced from USDG's live `DOMAIN_SEPARATOR()`, checks the payment requirement match (asset/amount/payTo), the authorization time window, and reads `authorizationState()` on-chain to reject replays. `POST /v1/offerings/:id/verify-payment` runs this end-to-end. This is **verification**, not settlement: submitting the signed authorization on-chain still requires an operator-run relayer wallet with gas, which is intentionally not wired into this codebase.
+
+### Explicitly not implemented
+
+- Hosted CLI/SDK publish beyond the current `@coragentic/mcp` package, or an external service SLA.
+- Private-key custody, signing, or automatic transaction broadcast anywhere in the codebase.
+- On-chain **submission** of the ERC-8004 registration call or x402 settlement — both are unsigned-calldata/verification-only; broadcasting is an external-wallet or operator-relayer action.
+- x402 settlement relayer service (verification is implemented; the gas-paying relayer that submits `transferWithAuthorization` is operator infrastructure, not part of this repository).
+- Distributed rate limiting, distributed spend accounting, or a managed worker queue.
+
+An agent created through the API is `status: "draft"` until its owner submits the registration transaction externally. Identity responses report `onchain: false` for unregistered agents; registry addresses in responses are metadata, not proof of a submitted transaction.
+
+## Run locally
+
+Prerequisite: a current Node.js runtime with `node:sqlite` support.
+
+```bash
+npm install
+npm run api       # API: http://127.0.0.1:8787
+npm run dev       # Vite frontend, in a second terminal
+
+curl http://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/v1/network
+```
+
+Useful server configuration:
+
+```text
+PORT=8787
+CORAGENTIC_DB=data/coragentic.sqlite
+ROBINHOOD_RPC_URL=https://…
+RATE_LIMIT_PER_MINUTE=120
+CORS_ORIGINS=http://localhost:5173,https://your-origin.example
+
+# Optional: inject the OpenRouter TypeSafe Jev Decisions adapter in server code.
+# It stays offline unless OPENROUTER_API_KEY is set; never commit this key.
+OPENROUTER_API_KEY=...
+CORAGENTIC_JEV_MODEL=typesafe/jev-1.13
+CORAGENTIC_JEV_TIMEOUT_MS=1000
+
+# Worker only; use a file: URL; the executor module must default-export an async function.
+CORAGENTIC_JOB_EXECUTOR=file:///absolute/path/to/executor.mjs
+CORAGENTIC_WORKER_INTERVAL_MS=2000
+CORAGENTIC_WORKER_ID=worker_local
+```
+
+To opt in from server-side composition code, import `createOpenRouterJevAdapterFromEnv` from `server/jev-openrouter.mjs` and pass its result where a `createDecisionAdapter`-compatible adapter is accepted. It only sends the explicit `input.state` supplied to each decision; missing credentials, invalid provider results, and request failures retain the deterministic offline fallback.
+
+Start the optional worker only with an explicit executor:
+
+```bash
+CORAGENTIC_JOB_EXECUTOR=file:///absolute/path/to/executor.mjs npm run worker
+```
+
+The worker claims `accepted` jobs from the configured SQLite database, executes that local module, and submits its returned deliverable. It is not a hosted queue or a payment/delivery guarantee. Check `GET /health/worker` before enabling it; it returns only configured/ready state and a stable reason code. The deployment-safe module contract and systemd template are in [`deploy/EXECUTOR-CONTRACT.md`](deploy/EXECUTOR-CONTRACT.md) and [`deploy/coragentic-worker.service`](deploy/coragentic-worker.service).
+
+## Documentation
+
+Run the frontend and open `/docs`. The docs use deep links at `/docs/:slug`, including:
+
+- `/docs/overview` and `/docs/getting-started`
+- `/docs/architecture`, `/docs/agents`, `/docs/runtime-policy`, `/docs/memory-rag`, and `/docs/swarm-decisions`
+- `/docs/offerings-jobs`, `/docs/market-swap`, and `/docs/mcp-a2a`
+- `/docs/security`, `/docs/self-hosting-testing`, and `/docs/api-reference`
+
+The manual is grounded in `server/index.mjs`, its server modules, and the workspace packages; it identifies current boundaries rather than treating planned work as shipped functionality.
+
+## HTTP surface
+
+Public/discovery routes include:
+
+```text
+GET /health
+GET /health/worker
+GET /v1/network
+GET /v1/agents
+GET /v1/agents/:id
+GET /v1/agents/:id/registration
+GET /v1/agents/:id/identity
+GET /.well-known/agent.json
+GET /a2a/agents/:id
+GET /mcp/manifest.json
+GET /.well-known/mcp.json
+```
+
+Authenticated routes use `Authorization: Bearer <session-token>`. Obtain a session by POSTing a wallet to `/v1/auth/challenge`, signing the returned message off-chain, then POSTing `wallet`, `nonce`, and `signature` to `/v1/auth/verify`. The full route behavior and limits are documented at `/docs/api-reference`.
+
+## Checks
+
+```bash
+npm run lint
+npm run build
+npm test
+npm run test:core
+npm run pack:check
+```
+
+`npm test` runs the server tests (including documentation-route catalogue coverage), then the core workspace tests/package check and MCP workspace tests. Build warnings about third-party bundle annotations or chunk size do not change test status; inspect them before shipping a frontend.

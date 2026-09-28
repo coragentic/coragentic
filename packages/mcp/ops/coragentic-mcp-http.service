@@ -1,0 +1,17 @@
+[Unit]
+Description=Coragentic MCP Streamable HTTP service
+After=network.target
+
+[Service]
+Type=simple
+User=coragentic
+WorkingDirectory=/opt/coragentic/packages/mcp
+EnvironmentFile=/etc/coragentic/mcp-http.env
+ExecStart=/usr/bin/env /bin/sh scripts/run-http.sh
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

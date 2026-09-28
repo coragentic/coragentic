@@ -1,0 +1,39 @@
+{
+  "name": "@coragentic/mcp",
+  "version": "0.1.0",
+  "description": "MCP stdio and Streamable HTTP server for the Coragentic API",
+  "type": "module",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/coragentic/coragentic.git", "directory": "packages/mcp" },
+  "homepage": "https://coragentic.app",
+  "bugs": { "url": "https://github.com/coragentic/coragentic/issues" },
+  "publishConfig": { "access": "public" },
+  "engines": {
+    "node": ">=18"
+  },
+  "mcpName": "io.github.coragentic/mcp",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./http": "./src/http-service.mjs"
+  },
+  "bin": {
+    "coragentic-mcp": "./src/index.mjs",
+    "coragentic-mcp-http": "./src/http.mjs",
+    "@coragentic/mcp": "./src/index.mjs"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "ops",
+    "README.md",
+    "LICENSE",
+    "server.json"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "pack:check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1"
+  }
+}

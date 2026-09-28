@@ -1,0 +1,22 @@
+{
+  "name": "@coragentic/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic, tool-driven agent runtime foundation",
+  "files": ["dist", "src", "examples", "README.md"],
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./src/index.mjs" },
+    "./runtime": { "types": "./dist/runtime.d.ts", "import": "./src/runtime.mjs" },
+    "./swarm": { "types": "./dist/swarm.d.ts", "import": "./src/swarm.mjs" },
+    "./manifest": { "types": "./dist/manifest.d.ts", "import": "./src/manifest.mjs" },
+    "./policy": { "types": "./dist/policy.d.ts", "import": "./src/policy.mjs" },
+    "./types": { "types": "./dist/types.d.ts" }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run typecheck && node --test test/*.test.mjs && npm run pack:check",
+    "pack:check": "npm run build && npm pack --dry-run"
+  }
+}

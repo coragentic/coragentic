@@ -1,0 +1,33 @@
+[Unit]
+Description=Coragentic durable agent worker
+After=network.target
+
+[Service]
+Type=simple
+User=coragentic
+Group=coragentic
+WorkingDirectory=/opt/coragentic
+ExecStart=/usr/bin/node /opt/coragentic/server/worker-entry.mjs
+Restart=on-failure
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=CORAGENTIC_DB=/var/lib/coragentic/coragentic.sqlite
+EnvironmentFile=-/etc/coragentic/worker.env
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/coragentic
+
+[Install]
+WantedBy=multi-user.target

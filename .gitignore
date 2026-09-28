@@ -1,0 +1,25 @@
+node_modules
+dist
+.DS_Store
+data/*.sqlite
+data/*.sqlite-shm
+data/*.sqlite-wal
+graphify-out/
+.env
+.env.local
+.env.*.local
+
+# Frontend source is deployed directly to Cloudflare Pages and intentionally not
+# tracked in this public backend/MCP/docs repository.
+/src/
+/public/
+/index.html
+/components.json
+/postcss.config.js
+/tailwind.config.js
+/tsconfig.app.json
+/vite.config.ts
+/eslint.config.js
+/scripts/verify-frontend-build.mjs
+/.claude/
+/info.md
