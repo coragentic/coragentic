@@ -30,7 +30,23 @@ migrateRagSchema(db);
 migrateSwarmSchema(db);
 const requestLimiter = createRateLimiter({ limit: Number(process.env.RATE_LIMIT_PER_MINUTE || 120), windowMs: 60_000 });
 const swarmDecisionAdapter = createOpenRouterJevAdapterFromEnv();
-const swarmDecisionProvider = process.env.OPENROUTER_API_KEY ? 'openrouter-jev-configured-with-offline-fallback' : 'offline';
+
+/**
+ * Derives the decisionProvider label from what actually answered each step's
+ * decisions, not from whether an API key merely exists at boot time. A
+ * configured-but-failing/unreachable Jev provider must honestly report
+ * 'offline', never fabricate partial Jev involvement.
+ */
+function actualDecisionProvider(steps) {
+  const providers = new Set();
+  for (const step of steps) {
+    const gateProvider = step?.decision_provider ?? step?.decisionProvider ?? step?.gate?.provider;
+    if (typeof gateProvider === 'string') providers.add(gateProvider);
+  }
+  if (providers.size === 0) return 'offline';
+  if (providers.has('openrouter-jev')) return providers.size === 1 ? 'openrouter-jev' : 'openrouter-jev-partial-offline-fallback';
+  return 'offline';
+}
 const usdgFacilitator = createUsdgFacilitator();
 const x402OnchainVerifier = createDirectTransferFacilitator();
 const x402Boundary = createX402Boundary({
@@ -223,19 +239,22 @@ async function handle(req, res) {
     if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
     const context = createBoundedContextInput(db, contextRequest, { ownerWallet: wallet, budget: 4_000 });
     const state = new SwarmState(db, { actor: wallet });
-    const runId = state.createRun({ goal, sharedEvidence: { context: context.metadata, decisionProvider: swarmDecisionProvider } });
+    const runId = state.createRun({ goal, sharedEvidence: { context: context.metadata } });
     const steps = workers.map((worker) => ({
       key: `worker:${worker.id}`,
       input: { worker: { id: worker.id, capabilities: worker.capabilities }, context: context.metadata },
       privateContext: context,
     }));
-    const run = await runSwarm(state, runId, steps, async (step) => ({
+    await runSwarm(state, runId, steps, async (step) => ({
       workerId: step.input.worker.id,
       capabilities: step.input.worker.capabilities,
       status: 'declared_not_executed',
       contextEvidenceCount: step.privateContext.evidence.length,
     }), { concurrency: 4, adapter: swarmDecisionAdapter });
-    return json(res, 201, { ok: true, data: { ...run, steps: state.listSteps(runId), decisionProvider: swarmDecisionProvider } });
+    const finalSteps = state.listSteps(runId);
+    const decisionProvider = actualDecisionProvider(finalSteps);
+    state.updateRun(runId, { sharedEvidence: { ...state.getRun(runId).sharedEvidence, decisionProvider } });
+    return json(res, 201, { ok: true, data: { ...state.getRun(runId), steps: finalSteps, decisionProvider } });
   }
   if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'swarm' && parts[2]) {
     const wallet = sessionWallet(req);

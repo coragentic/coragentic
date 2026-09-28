@@ -18,6 +18,7 @@ export function migrateSwarmSchema(db) {
       id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES swarm_runs(id), step_key TEXT NOT NULL,
       status TEXT NOT NULL, input_json TEXT NOT NULL DEFAULT '{}', output_json TEXT,
       score REAL, error TEXT, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL,
+      decision_provider TEXT,
       UNIQUE(run_id, step_key)
     );
     CREATE INDEX IF NOT EXISTS idx_swarm_steps_run ON swarm_steps(run_id, step_key);
@@ -31,6 +32,11 @@ export function migrateSwarmSchema(db) {
       worker_id TEXT, ready INTEGER NOT NULL DEFAULT 0, reason TEXT, updated_at TEXT NOT NULL
     );
   `);
+  // Idempotent column add for databases created before decision_provider existed.
+  const swarmStepColumns = db.prepare('PRAGMA table_info(swarm_steps)').all().map((column) => column.name);
+  if (!swarmStepColumns.includes('decision_provider')) {
+    db.exec('ALTER TABLE swarm_steps ADD COLUMN decision_provider TEXT');
+  }
 }
 
 export class SwarmState {
@@ -80,14 +86,14 @@ export class SwarmState {
     const key = step.key ?? step.stepKey;
     if (!key) throw new TypeError('step key is required');
     const previous = this.getStep(runId, key);
-    const value = { status: 'pending', input: step.input ?? {}, output: undefined, score: null, error: null, ...step, ...patch };
+    const value = { status: 'pending', input: step.input ?? {}, output: undefined, score: null, error: null, decisionProvider: null, ...step, ...patch };
     const stamp = now();
     if (!previous) {
-      this.db.prepare('INSERT INTO swarm_steps (id, run_id, step_key, status, input_json, output_json, score, error, started_at, completed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(randomUUID(), runId, key, value.status, json(value.input), value.output === undefined ? null : json(value.output), value.score, value.error, value.startedAt ?? null, value.completedAt ?? null, stamp);
+      this.db.prepare('INSERT INTO swarm_steps (id, run_id, step_key, status, input_json, output_json, score, error, started_at, completed_at, updated_at, decision_provider) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(randomUUID(), runId, key, value.status, json(value.input), value.output === undefined ? null : json(value.output), value.score, value.error, value.startedAt ?? null, value.completedAt ?? null, stamp, value.decisionProvider ?? null);
     } else {
-      this.db.prepare('UPDATE swarm_steps SET status = ?, input_json = ?, output_json = ?, score = ?, error = ?, started_at = ?, completed_at = ?, updated_at = ? WHERE run_id = ? AND step_key = ?')
-        .run(value.status, json(value.input ?? previous.input), value.output === undefined ? (previous.output == null ? null : json(previous.output)) : json(value.output), value.score ?? previous.score, value.error ?? previous.error, value.startedAt ?? previous.started_at, value.completedAt ?? previous.completed_at, stamp, runId, key);
+      this.db.prepare('UPDATE swarm_steps SET status = ?, input_json = ?, output_json = ?, score = ?, error = ?, started_at = ?, completed_at = ?, updated_at = ?, decision_provider = ? WHERE run_id = ? AND step_key = ?')
+        .run(value.status, json(value.input ?? previous.input), value.output === undefined ? (previous.output == null ? null : json(previous.output)) : json(value.output), value.score ?? previous.score, value.error ?? previous.error, value.startedAt ?? previous.started_at, value.completedAt ?? previous.completed_at, stamp, value.decisionProvider ?? previous.decision_provider ?? null, runId, key);
     }
     this.audit(runId, 'swarm_step_updated', { stepKey: key, status: value.status });
     return this.getStep(runId, key);
@@ -189,7 +195,7 @@ export async function runSwarm(state, runId, steps, worker, { concurrency = 4, a
       const score = await scoreResult(adapter, { runId, step, result, state: decisionState, criteria: ['reject', 'approve'] });
       const gate = await noulGate(adapter, { runId, step, result, score, threshold: effectiveThreshold, state: decisionState, criteria: { true: 'allow', false: 'deny' } });
       const status = gate.status === 'human_escalation' ? 'human_escalation' : gate.status === 'rejected' ? 'rejected' : 'completed';
-      state.upsertStep(runId, step, { status, output: result, score, error: gate.reason ?? null, completedAt: now() });
+      state.upsertStep(runId, step, { status, output: result, score, error: gate.reason ?? null, completedAt: now(), decisionProvider: gate.provider ?? null });
       const current = state.getRun(runId);
       const evidence = { ...current.sharedEvidence, [key]: result };
       state.updateRun(runId, { status, sharedEvidence: evidence, humanEscalation: status === 'human_escalation' ? (gate.reason || 'human review required') : current.humanEscalation });

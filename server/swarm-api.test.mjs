@@ -37,9 +37,9 @@ function seed(path) {
   db.close();
 }
 
-async function start(path) {
+async function start(path, env = {}) {
   const value = await port();
-  const child = spawn(process.execPath, ['server/index.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: String(value), CORAGENTIC_DB: path, OPENROUTER_API_KEY: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['server/index.mjs'], { cwd: process.cwd(), env: { ...process.env, PORT: String(value), CORAGENTIC_DB: path, OPENROUTER_API_KEY: '', ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('server did not start')), 3_000);
     child.stdout.on('data', (chunk) => { if (String(chunk).includes('listening')) { clearTimeout(timer); resolve(); } });
@@ -80,4 +80,34 @@ test('authenticated owner creates a bounded durable declared-worker swarm run', 
     assert.equal(db.prepare("SELECT count(*) AS n FROM audit_events WHERE entity_type = 'swarm' AND entity_id = ?").get(run.id).n >= 3, true);
     db.close();
   } finally { await stop(child); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('decisionProvider on the run response reflects the ACTUAL provider that answered, not a boot-time guess', async () => {
+  // A live-configured key that always fails/malformed-responds must report 'offline'
+  // on the run, never a misleading 'configured-with-offline-fallback' placeholder —
+  // regression test for the real bug found manually: the API previously hardcoded
+  // decisionProvider from whether an env var was merely set, not from what actually
+  // answered each decision call.
+  const dir = mkdtempSync(join(tmpdir(), 'coragentic-swarm-provider-'));
+  const path = join(dir, 'db.sqlite'); seed(path);
+  const mockServer = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => { res.writeHead(500); res.end('provider down'); });
+  });
+  await new Promise((resolve) => mockServer.listen(0, resolve));
+  const mockPort = mockServer.address().port;
+  const { child, base } = await start(path, {
+    OPENROUTER_API_KEY: 'sk-or-fake-for-test',
+    CORAGENTIC_JEV_DECISIONS_URL: `http://127.0.0.1:${mockPort}/decisions`,
+  });
+  try {
+    const payload = { goal: 'deploy safely', context: { agentId: 'agent-a', query: 'deployment' }, workers: [{ id: 'worker-a', capabilities: ['deploy'] }] };
+    const created = await request(base, payload);
+    assert.equal(created.status, 201);
+    // Even though a key was "configured", every actual decision failed, so the
+    // reported provider must honestly be 'offline' — not a fabricated claim of
+    // partial Jev involvement.
+    assert.equal(created.body.data.decisionProvider, 'offline');
+  } finally { await stop(child); mockServer.close(); rmSync(dir, { recursive: true, force: true }); }
 });

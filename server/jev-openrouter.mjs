@@ -51,7 +51,7 @@ function answerMetadata(body) {
   }
 }
 
-function operation(kind, { apiKey, fetch, model, timeout, maxStateBytes }) {
+function operation(kind, { apiKey, fetch, model, timeout, maxStateBytes, decisionsUrl }) {
   return async (input, options = {}) => {
     const state = encodedState(input, maxStateBytes);
     const criteria = criteriaFor(kind, input);
@@ -60,7 +60,7 @@ function operation(kind, { apiKey, fetch, model, timeout, maxStateBytes }) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const response = await fetch(OPENROUTER_DECISIONS_URL, {
+      const response = await fetch(decisionsUrl || OPENROUTER_DECISIONS_URL, {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ model, state, questions: { decision: question } }),
@@ -95,10 +95,11 @@ export function createOpenRouterJevAdapter({
   model = DEFAULT_JEV_MODEL,
   timeout = DEFAULT_JEV_TIMEOUT_MS,
   maxStateBytes = DEFAULT_MAX_STATE_BYTES,
+  decisionsUrl,
 } = {}) {
   const safeTimeout = positiveNumber(timeout, DEFAULT_JEV_TIMEOUT_MS);
   const safeStateBytes = positiveNumber(maxStateBytes, DEFAULT_MAX_STATE_BYTES);
-  const config = { apiKey: typeof apiKey === 'string' && apiKey ? apiKey : '', fetch: typeof fetchImpl === 'function' ? fetchImpl : null, model, timeout: safeTimeout, maxStateBytes: safeStateBytes };
+  const config = { apiKey: typeof apiKey === 'string' && apiKey ? apiKey : '', fetch: typeof fetchImpl === 'function' ? fetchImpl : null, model, timeout: safeTimeout, maxStateBytes: safeStateBytes, decisionsUrl };
   return createDecisionAdapter({
     choice: operation('choice', config),
     score: operation('score', config),
@@ -113,6 +114,7 @@ export function createOpenRouterJevAdapterFromEnv({ env = process.env, fetch } =
     apiKey: env.OPENROUTER_API_KEY,
     model: env.CORAGENTIC_JEV_MODEL || DEFAULT_JEV_MODEL,
     timeout: positiveNumber(env.CORAGENTIC_JEV_TIMEOUT_MS, DEFAULT_JEV_TIMEOUT_MS),
+    decisionsUrl: env.CORAGENTIC_JEV_DECISIONS_URL || undefined,
     fetch,
   });
 }
