@@ -16,7 +16,7 @@ const frontendPage = new URL('../src/pages/DocsPage.tsx', import.meta.url);
 const expectedSlugs = [
   'overview', 'getting-started', 'architecture', 'agents', 'runtime-policy',
   'private-context', 'swarm-decisions', 'offerings-jobs', 'market-swap', 'mcp-a2a',
-  'security', 'self-hosting-testing', 'api-reference',
+  'security', 'self-hosting-testing', 'cora-token', 'api-reference',
 ];
 
 test('documentation route catalogue has every deep-link page', () => {

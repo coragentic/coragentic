@@ -27,14 +27,13 @@ Hosted deployment:
 - Unsigned swap calldata previews; an external wallet must review, sign, and broadcast.
 - Deterministic core-runtime policy/allowlist primitives and a separate MCP server (stdio + Streamable HTTP).
 - **ERC-8004 Trustless Agents identity registry integration**: the deployed `IdentityRegistry` at `0x8004A169FB4a3325136EB29fA0ceB6D2e539a432` on Robinhood Chain is the same canonical singleton address used across every ERC-8004 chain. Its ABI is vendored from the official [`erc-8004/erc-8004-contracts`](https://github.com/erc-8004/erc-8004-contracts) repository and cross-checked against live `name()`/`symbol()` reads. `GET /v1/agents/:id/registration-call` returns unsigned `register(string)` calldata for the owner's external wallet to sign and broadcast; Coragentic never holds a private key or submits the transaction itself.
-- **x402 payment verification on Robinhood Chain**: `server/x402-facilitator.mjs` independently verifies EIP-3009 `transferWithAuthorization` payments in **USDG** (`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`), which implements EIP-3009. Verification recovers the real EIP-712 signature against the domain reproduced from USDG's live `DOMAIN_SEPARATOR()`, checks the payment requirement match (asset/amount/payTo), the authorization time window, and reads `authorizationState()` on-chain to reject replays. `POST /v1/offerings/:id/verify-payment` runs this end-to-end. This is **verification**, not settlement: submitting the signed authorization on-chain still requires an operator-run relayer wallet with gas, which is intentionally not wired into this codebase.
+- **x402 payment verification and non-custodial settlement on Robinhood Chain**: `server/x402-facilitator.mjs` verifies EIP-3009 `transferWithAuthorization` payments in **USDG** (`0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168`) against its live EIP-712 domain, amount/payTo/time window, and on-chain `authorizationState()` replay state. `POST /v1/offerings/:id/verify-payment` performs that authorization verification. For settlement, `POST /v1/offerings/:id/settle` receives a payer-submitted transaction hash and independently verifies the successful ERC-20 USDG `Transfer` receipt on-chain, then atomically records that hash to reject replay. The payer signs and broadcasts their own transfer; Coragentic never holds a key, signs, broadcasts, or runs a gas-funded relayer.
+- **$CORA token contract (verified on-chain)**: `0x5c7315710d5bfff95c3d681ca30c327f33deda99` on Robinhood Chain (EIP-155 4663). Direct ERC-20 reads return `name=Coragentic`, `symbol=CORA`, and `decimals=18`. $CORA is not required for the app, API, or MCP; this repository makes no investment recommendation or price claim.
 
 ### Explicitly not implemented
 
 - Hosted CLI/SDK publish beyond the current `@coragentic/mcp` package, or an external service SLA.
-- Private-key custody, signing, or automatic transaction broadcast anywhere in the codebase.
-- On-chain **submission** of the ERC-8004 registration call or x402 settlement — both are unsigned-calldata/verification-only; broadcasting is an external-wallet or operator-relayer action.
-- x402 settlement relayer service (verification is implemented; the gas-paying relayer that submits `transferWithAuthorization` is operator infrastructure, not part of this repository).
+- Private-key custody, signing, or automatic transaction broadcast anywhere in the codebase. x402 settlement remains non-custodial: the payer broadcasts the transfer, while Coragentic only verifies its receipt and records replay protection.
 - Distributed rate limiting, distributed spend accounting, or a managed worker queue.
 
 An agent created through the API is `status: "draft"` until its owner submits the registration transaction externally. Identity responses report `onchain: false` for unregistered agents; registry addresses in responses are metadata, not proof of a submitted transaction.
@@ -91,7 +90,7 @@ The hosted docs are at [`coragentic.app/docs`](https://coragentic.app/docs), wit
 - `/docs/overview` and `/docs/getting-started`
 - `/docs/architecture`, `/docs/agents`, `/docs/runtime-policy`, `/docs/private-context`, and `/docs/swarm-decisions`
 - `/docs/offerings-jobs`, `/docs/market-swap`, and `/docs/mcp-a2a`
-- `/docs/security`, `/docs/self-hosting-testing`, and `/docs/api-reference`
+- `/docs/security`, `/docs/self-hosting-testing`, `/docs/cora-token`, and `/docs/api-reference`
 
 The manual is grounded in `server/index.mjs`, its server modules, and the workspace packages; it identifies current boundaries rather than treating planned work as shipped functionality. A system design document covering architecture and request/data flow is in [`CORAGENTIC-SDD.md`](CORAGENTIC-SDD.md).
 
