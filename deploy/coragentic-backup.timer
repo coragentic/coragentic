@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Coragentic state backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00 UTC
+Persistent=true
+RandomizedDelaySec=10m
+Unit=coragentic-backup.service
+
+[Install]
+WantedBy=timers.target

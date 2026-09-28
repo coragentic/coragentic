@@ -81,7 +81,7 @@ Start the optional worker only with an explicit executor:
 CORAGENTIC_JOB_EXECUTOR=file:///absolute/path/to/executor.mjs npm run worker
 ```
 
-The worker claims `accepted` jobs from the configured SQLite database, executes that local module, and submits its returned deliverable. It is not a hosted queue or a payment/delivery guarantee. Check `GET /health/worker` before enabling it; it returns only configured/ready state and a stable reason code. The deployment-safe module contract and systemd template are in [`deploy/EXECUTOR-CONTRACT.md`](deploy/EXECUTOR-CONTRACT.md) and [`deploy/coragentic-worker.service`](deploy/coragentic-worker.service).
+The worker claims `accepted` jobs from the configured SQLite database, executes that local module, and submits its returned deliverable. It is not a hosted queue or a payment/delivery guarantee. Check `GET /health/worker` before enabling it; it returns only configured/ready state and a stable reason code. The deployment-safe module contract and systemd template are in [`deploy/EXECUTOR-CONTRACT.md`](deploy/EXECUTOR-CONTRACT.md) and [`deploy/coragentic-worker.service`](deploy/coragentic-worker.service). Production recovery, backup, and restore instructions are in [`deploy/PRODUCTION-RECOVERY.md`](deploy/PRODUCTION-RECOVERY.md); wallet-approved ERC-8004/x402 proof instructions are in [`deploy/WALLET-APPROVED-PROOF.md`](deploy/WALLET-APPROVED-PROOF.md).
 
 ## Documentation
 

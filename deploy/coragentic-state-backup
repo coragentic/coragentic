@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Root-only, consistent SQLite backup for Coragentic production state.
+# Keeps the newest 14 daily snapshots and is silent on success.
+set -euo pipefail
+umask 077
+
+SRC_DB="/var/lib/coragentic/coragentic.sqlite"
+DEST_DIR="/var/backups/coragentic"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+TMP_DB="$DEST_DIR/.coragentic-$STAMP.sqlite"
+ARCHIVE="$DEST_DIR/coragentic-state-$STAMP.tar.gz"
+
+mkdir -p "$DEST_DIR"
+chmod 700 "$DEST_DIR"
+
+# SQLite's backup API makes an online, consistent snapshot without stopping API.
+sqlite3 "$SRC_DB" ".backup '$TMP_DB'"
+tar -C "$DEST_DIR" -czf "$ARCHIVE" "$(basename "$TMP_DB")"
+rm -f "$TMP_DB"
+
+tar -tzf "$ARCHIVE" | grep -q '\.sqlite$'
+test -s "$ARCHIVE"
+ls -1t "$DEST_DIR"/coragentic-state-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm -f

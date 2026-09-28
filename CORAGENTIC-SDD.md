@@ -50,6 +50,7 @@ Developer / AI client
 ```
 
 - The API, MCP HTTP service, and Cloudflare Tunnel run as isolated systemd services under a dedicated `coragentic` system user.
+- A root-only `coragentic-backup.timer` runs a daily SQLite online-backup snapshot at 03:20 UTC (up to 10-minute jitter), retains 14 archives in `/var/backups/coragentic`, and its archive integrity check has been exercised.
 - Node is pinned to Node 26 because the implementation uses `node:sqlite`.
 - The npm package is published as [`@coragentic/mcp@0.2.0`](https://www.npmjs.com/package/@coragentic/mcp). Its installer is idempotent, preserves existing MCP servers, and writes no secrets.
 - The public GitHub repository contains backend/MCP/core/docs. The Cloudflare Pages frontend is deployed separately by design.
