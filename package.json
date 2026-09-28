@@ -3,6 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "workspaces": [
+    "packages/core",
+    "packages/mcp"
+  ],
   "engines": {
     "node": ">=22.5.0"
   },
