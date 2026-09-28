@@ -1,8 +1,15 @@
 # Coragentic
 
-Coragentic is a **self-hosted, local-first implementation reference** for wallet-owned agent drafts, deterministic tool-runtime primitives, SQLite-backed workflow state, and Robinhood Chain helpers (EIP-155 chain 4663). It also runs a hosted deployment at [coragentic.app](https://coragentic.app) with a live API (`api.coragentic.app`) and remote MCP endpoint (`mcp.coragentic.app`).
+Coragentic is an **agent operating network**: wallet-owned agent identity, private per-agent context, swarm coordination, jobs/offerings, policy-gated tool execution, and audit proof — with Robinhood Chain (EIP-155 chain 4663) as its execution rail.
 
-It is a Vite/React frontend plus a Node HTTP server. The repository also contains public workspace packages for a provider-neutral runtime (`packages/core`) and a stdio + Streamable HTTP MCP adapter (`packages/mcp`, published as [`@coragentic/mcp`](https://www.npmjs.com/package/@coragentic/mcp) on npm).
+This repository is the **backend, MCP server, and core runtime** — the API, the durable SQLite-backed state machine, the ERC-8004 identity integration, and the x402 payment verification facilitator. The production frontend (Vite/React) is deployed directly to Cloudflare Pages from a separate, private working tree and is not published in this repository.
+
+Hosted deployment:
+
+- Web app: [coragentic.app](https://coragentic.app)
+- API: `https://api.coragentic.app`
+- Remote MCP endpoint: `https://mcp.coragentic.app`
+- MCP npm package: [`@coragentic/mcp`](https://www.npmjs.com/package/@coragentic/mcp)
 
 ## Current state
 
@@ -29,16 +36,17 @@ An agent created through the API is `status: "draft"` until its owner submits th
 
 ## Run locally
 
-Prerequisite: a current Node.js runtime with `node:sqlite` support.
+Prerequisite: a current Node.js runtime with `node:sqlite` support (Node 22.5+; this repository is developed and deployed on Node 26).
 
 ```bash
 npm install
 npm run api       # API: http://127.0.0.1:8787
-npm run dev       # Vite frontend, in a second terminal
 
 curl http://127.0.0.1:8787/health
 curl http://127.0.0.1:8787/v1/network
 ```
+
+This repository does not include the frontend. To build a client against this API, target `VITE_API_URL` (or an equivalent) at your running instance and use the routes documented below and at `https://coragentic.app/docs`.
 
 Useful server configuration:
 
@@ -73,14 +81,14 @@ The worker claims `accepted` jobs from the configured SQLite database, executes 
 
 ## Documentation
 
-Run the frontend and open `/docs`. The docs use deep links at `/docs/:slug`, including:
+The hosted docs are at [`coragentic.app/docs`](https://coragentic.app/docs), with deep links at `/docs/:slug`, including:
 
 - `/docs/overview` and `/docs/getting-started`
-- `/docs/architecture`, `/docs/agents`, `/docs/runtime-policy`, `/docs/memory-rag`, and `/docs/swarm-decisions`
+- `/docs/architecture`, `/docs/agents`, `/docs/runtime-policy`, `/docs/private-context`, and `/docs/swarm-decisions`
 - `/docs/offerings-jobs`, `/docs/market-swap`, and `/docs/mcp-a2a`
 - `/docs/security`, `/docs/self-hosting-testing`, and `/docs/api-reference`
 
-The manual is grounded in `server/index.mjs`, its server modules, and the workspace packages; it identifies current boundaries rather than treating planned work as shipped functionality.
+The manual is grounded in `server/index.mjs`, its server modules, and the workspace packages; it identifies current boundaries rather than treating planned work as shipped functionality. A system design document covering architecture and request/data flow is in [`CORAGENTIC-SDD.md`](CORAGENTIC-SDD.md).
 
 ## HTTP surface
 
@@ -105,11 +113,9 @@ Authenticated routes use `Authorization: Bearer <session-token>`. Obtain a sessi
 ## Checks
 
 ```bash
-npm run lint
-npm run build
 npm test
 npm run test:core
 npm run pack:check
 ```
 
-`npm test` runs the server tests (including documentation-route catalogue coverage), then the core workspace tests/package check and MCP workspace tests. Build warnings about third-party bundle annotations or chunk size do not change test status; inspect them before shipping a frontend.
+`npm test` runs the server tests (including documentation-route catalogue coverage), then the core workspace tests/package check and MCP workspace tests. This repository has no frontend to lint or build; the frontend project runs its own `npm run lint`/`npm run build` separately.
