@@ -1,6 +1,6 @@
 {
   "name": "@coragentic/mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP stdio and Streamable HTTP server for the Coragentic API",
   "type": "module",
   "license": "MIT",
@@ -18,8 +18,9 @@
   },
   "bin": {
     "coragentic-mcp": "./src/index.mjs",
+    "coragentic-mcp-install": "./src/install.mjs",
     "coragentic-mcp-http": "./src/http.mjs",
-    "@coragentic/mcp": "./src/index.mjs"
+    "@coragentic/mcp": "./src/install.mjs"
   },
   "files": [
     "src",

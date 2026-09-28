@@ -14,15 +14,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26
           cache: npm
       - run: npm ci
-      - name: Frontend lint
-        run: npm run lint
-      - name: Frontend build
-        run: npm run build
-      - name: Server tests and core tests/typecheck
+      - name: Server tests, core tests/typecheck, MCP tests
         run: npm test
+      - name: MCP package check
+        run: npm run pack:check
       - name: Dependency audit
         run: npm audit --omit=dev --audit-level=high
       - name: Secret scan

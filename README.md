@@ -1,5 +1,10 @@
 # Coragentic
 
+[![npm version](https://img.shields.io/npm/v/@coragentic/mcp)](https://www.npmjs.com/package/@coragentic/mcp)
+[![CI](https://github.com/coragentic/coragentic/actions/workflows/ci.yml/badge.svg)](https://github.com/coragentic/coragentic/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/coragentic/coragentic/pulls)
+
 Coragentic is an **agent operating network**: wallet-owned agent identity, private per-agent context, swarm coordination, jobs/offerings, policy-gated tool execution, and audit proof — with Robinhood Chain (EIP-155 chain 4663) as its execution rail.
 
 This repository is the **backend, MCP server, and core runtime** — the API, the durable SQLite-backed state machine, the ERC-8004 identity integration, and the x402 payment verification facilitator. The production frontend (Vite/React) is deployed directly to Cloudflare Pages from a separate, private working tree and is not published in this repository.

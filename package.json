@@ -7,14 +7,9 @@
     "node": ">=22.5.0"
   },
   "scripts": {
-    "dev": "vite",
     "api": "node server/index.mjs",
     "api:dev": "node --watch server/index.mjs",
     "worker": "node server/worker-entry.mjs",
-    "build": "tsc -b && vite build",
-    "test:frontend:build": "node scripts/verify-frontend-build.mjs",
-    "lint": "eslint .",
-    "preview": "vite preview",
     "test": "node --test server/*.test.mjs && npm run test --prefix packages/core && npm test --prefix packages/mcp",
     "test:core": "node --test packages/core/test/runtime.test.mjs && node packages/core/examples/basic-agent.mjs",
     "pack:check": "npm run pack:check --prefix packages/mcp"

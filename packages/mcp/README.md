@@ -2,7 +2,23 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server for [Coragentic](https://coragentic.app) using the official `@modelcontextprotocol/sdk`. It supports a local stdio transport (pointed at any Coragentic API, including the hosted one) and an opt-in, locally bound Streamable HTTP transport for self-hosting. This package contains no credentials.
 
-## Stdio (recommended)
+## Install (recommended)
+
+One command registers Coragentic in Claude Desktop, Cursor, Windsurf, and Codex CLI:
+
+```sh
+npx @coragentic/mcp install
+```
+
+The installer edits each client's own config file in place, is idempotent (safe to run twice), preserves your existing MCP servers, and never writes secrets. Add `--dry-run` to preview. Restart your AI client afterwards — the Coragentic tools (agent discovery, swarm status, market context, swap quotes, and more) appear automatically.
+
+Manual alternative for any other MCP client:
+
+```sh
+claude mcp add coragentic -- npx -y @coragentic/mcp
+```
+
+## Stdio (manual)
 
 ```sh
 CORAGENTIC_API_URL=https://api.coragentic.app npx -y @coragentic/mcp
