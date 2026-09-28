@@ -35,6 +35,6 @@ test('documentation route catalogue has every deep-link page', () => {
   // here to check against, so just assert the documented slug contract itself
   // is well-formed and non-empty. Live reachability of the hosted docs is
   // verified separately by manual/deploy-time checks, not by this unit test.
-  assert.ok(Array.isArray(expectedSlugs) && expectedSlugs.length === 13);
+  assert.ok(Array.isArray(expectedSlugs) && expectedSlugs.length === 14);
   assert.ok(expectedSlugs.every((slug) => typeof slug === 'string' && /^[a-z0-9-]+$/.test(slug)));
 });
