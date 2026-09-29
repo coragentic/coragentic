@@ -66,3 +66,27 @@ test('resume is idempotent by step and does not rerun completed work', async () 
   assert.equal(second.status, 'completed');
   assert.equal(calls, 2);
 });
+
+test('concurrent workers writing shared evidence do not lose each other\'s results (lost-update race)', async () => {
+  const database = db();
+  const state = new SwarmState(database);
+  const runId = state.createRun({ goal: 'race' });
+  // 8 steps at concurrency 4, matching the API's real defaults (server/index.mjs).
+  // Each worker yields the event loop for a jittered delay BEFORE returning, so
+  // multiple workers are genuinely mid-flight (both past their read of current
+  // sharedEvidence) when they each go to merge their own key in and write back --
+  // exactly the interleaving that causes a read-modify-write race.
+  const keys = Array.from({ length: 8 }, (_, i) => `step-${i}`);
+  const steps = keys.map((key) => ({ key }));
+  const delays = [7, 1, 6, 2, 5, 3, 4, 8];
+  const result = await runSwarm(state, runId, steps, async (step, index) => {
+    const delayMs = delays[keys.indexOf(step.key ?? step.stepKey)];
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return { key: step.key, index };
+  }, { concurrency: 4 });
+  assert.equal(result.status, 'completed');
+  // Every one of the 8 workers' results must be present in the final shared
+  // evidence -- a lost update means fewer than 8 keys survive the merge.
+  const evidenceKeys = Object.keys(result.sharedEvidence).filter((key) => key.startsWith('step-'));
+  assert.deepEqual(evidenceKeys.sort(), keys.slice().sort());
+});

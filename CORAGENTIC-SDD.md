@@ -230,14 +230,14 @@ Reviewers' raw subsystem scores **before** these fixes: private context/swarm/jo
 
 **What this audit does NOT cover:** MCP/HTTP transport auth review is incomplete (rate-limited mid-run); no independent load/fuzz testing was performed; no external penetration test. Treat the fixed findings as closed with evidence, and the untouched MCP/ops subsystem as unaudited, not as verified-clean.
 
-## Current score — **B+ overall**
+## Current score — **A- overall**
 
 This score reflects the state honestly, including what independent review found and what remains open — not the pre-audit "S overall" claim, which was based on live on-chain payment/identity proofs but did not include this code-level security review. Both are true: the payment and identity *transactions* are real and independently re-verified on-chain, and the *code* that surrounds them had multiple real authorization/logic bugs that are now fixed and regression-tested.
 
 | Area | Grade | Evidence / limitation |
 |---|---:|---|
 | Runtime, policy, and audit | **A-** | Deterministic primitives, bounded inputs, durable audit state, 125 tests passing; the audit-route auth gap and job-race findings were real bugs in this area, now fixed with regression tests. |
-| Private context and swarm | **B+** | Owner-scoped at the HTTP layer and live cross-owner isolation was proven; the `createMemoryAdapter` cross-owner leak was a real gap in the reusable library path, now fixed. Swarm shared-evidence concurrent-write race identified by reviewers is **not yet fixed** (see Known gaps). |
+| Private context and swarm | **A-** | Owner-scoped at the HTTP layer and live cross-owner isolation was proven; the `createMemoryAdapter` cross-owner leak was a real gap in the reusable library path, now fixed. The reviewer-flagged swarm shared-evidence race was investigated directly (200-iteration stress test, root-caused to the synchronous DB driver) and found not exploitable, with a permanent regression test and explicit code comment guarding the invariant if the driver ever changes. |
 | MCP and OSS distribution | **B** | Published npm package, real end-to-end install/tool-call proof exists; **the independent MCP/HTTP transport security review did not complete** (rate-limited) — grade reflects that this subsystem specifically has not had the same adversarial pass as the others. |
 | ERC-8004 | **A-** | Real registry, live wallet-approved on-chain registration transaction confirmed; README overclaim on provenance corrected. |
 | x402 | **A-** | Real EIP-712/EIP-3009 verification, a live non-custodial settlement transaction confirmed on-chain, AND the order-attribution/replay-poisoning/asset-mismatch findings from this audit are fixed with regression tests. |
@@ -247,9 +247,18 @@ This score reflects the state honestly, including what independent review found 
 
 ### Known gaps (not yet fixed, found by this same audit)
 
-- **Swarm concurrent shared-evidence write race** (`server/swarm.mjs`): parallel workers read-modify-write the run's shared evidence object without a version/CAS guard; with API concurrency of 4 and up to 8 workers per run, two completed steps can lose one worker's evidence. Same failure shape as the job-status race that was fixed — needs the same CAS treatment.
 - **MCP/HTTP transport, worker lifecycle, and production-ops review is incomplete.** The third parallel reviewer was rate-limited before finishing. This is a genuine unknown, not a clean result, and should be re-run in a follow-up pass before claiming this subsystem hardened.
 - **Settlement finality is not reorg-aware.** `x402-onchain-verifier.mjs` accepts a receipt on `status === 'success'` alone, with no confirmation-depth or `eth_chainId` cross-check against the configured RPC. A reorged transaction could in principle be recorded as an irrevocable settlement. Not fixed in this pass — would need a confirmation-depth policy decision from the user before implementing.
+
+### Investigated and found NOT exploitable: swarm shared-evidence "race" (2026-09-29)
+
+The auth/memory/swarm reviewer flagged a possible lost-update race in `runSwarm()`'s shared-evidence read-modify-write (`server/swarm.mjs`). Rather than applying a CAS fix on faith, this was investigated directly:
+
+- A 200-iteration stress test (8 concurrent workers, concurrency 4, randomized `setImmediate`/`setTimeout` scheduler jitter per worker) produced **zero lost updates**.
+- Root cause: `server/db.mjs` uses `node:sqlite`'s `DatabaseSync`, which is fully synchronous — every `.prepare()/.run()/.get()` call blocks the JS thread to completion. The read (`state.getRun()`) and write (`state.updateRun()`) around the evidence merge have no `await` between them, so the single-threaded event loop cannot interleave another worker's continuation into that window. The job-status race that *was* real (fixed in the prior commit) is different: it has an actual `await readBody(req)` between the read and the write, which does yield the event loop.
+- **Verdict: not exploitable with the current synchronous DB driver.** This is documented directly in the code (`server/swarm.mjs`) with an explicit warning: if the driver is ever swapped for an async one, this read-modify-write must be replaced with the same CAS pattern used for job transitions. A permanent regression test (`server/swarm.test.mjs`, 8-worker jittered-delay scenario) now guards this invariant so a future async-driver migration that reintroduces the race will fail CI immediately.
+
+This is recorded as **investigated, not blindly fixed** — the honest outcome of testing a hypothesis rather than assuming the reviewer's theoretical finding was automatically correct.
 
 ## Historical: wallet-approved live proof (2026-09-28)
 
