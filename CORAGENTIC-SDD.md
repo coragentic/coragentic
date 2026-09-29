@@ -240,7 +240,7 @@ This reflects three full rounds of independent review (auth/memory/swarm/jobs; p
 | Private context and swarm | **A-** | Owner-scoped at the HTTP layer and live cross-owner isolation was proven; the `createMemoryAdapter` cross-owner leak was a real gap in the reusable library path, now fixed. The reviewer-flagged swarm shared-evidence race was investigated directly (200-iteration stress test, root-caused to the synchronous DB driver) and found not exploitable, with a permanent regression test and explicit code comment guarding the invariant if the driver ever changes. |
 | MCP and OSS distribution | **A-** | Published npm package (`@coragentic/mcp@0.2.1`), real end-to-end install/tool-call proof exists, AND the independent MCP transport review completed: live-reproduced rate-limiting and security-header gaps are fixed and live-reverified, ops unit hardening synced and resource-ceilinged. |
 | ERC-8004 | **A-** | Real registry, live wallet-approved on-chain registration transaction confirmed; README overclaim on provenance corrected. |
-| x402 | **A-** | Real EIP-712/EIP-3009 verification, a live non-custodial settlement transaction confirmed on-chain, AND the order-attribution/replay-poisoning/asset-mismatch findings from this audit are fixed with regression tests. |
+| x402 | **A** | Real EIP-712/EIP-3009 verification, a live non-custodial settlement transaction confirmed on-chain, the order-attribution/replay-poisoning/asset-mismatch findings from this audit are fixed with regression tests, AND settlement is now reorg-aware (confirmation-depth + RPC chain-id checks, both regression-tested). |
 | Web and app UI | **A-** | Live indigo rebrand, full-height market terminal, workspace actions (save context, run swarm, create offering) wired to real API calls with end-to-end proof; measured Lighthouse 97/100/100/100. |
 | Production deployment | **A** | Live custom domains, systemd isolation, Cloudflare Tunnel, daily backup timer with a verified valid archive, SQLite integrity `ok`. |
 | CI / reproducibility | **A** | GitHub Actions green for the latest commit; the fix commit above is included in that green run. |
@@ -261,10 +261,18 @@ Subsystem score at review time: **72/100** (capped by the two live-reproduced fi
 
 **Post-fix verification:** 109 server + 10 core + 9 MCP tests passing (MCP test count 7→9: 2 new regression tests for rate limiting and security headers). Deployed live and re-verified: `mcp.coragentic.app` now returns all four security headers, and a 65-request burst against `/mcp` produced 60× `401` (within the configured limit) then 5× `429` (correctly throttled) — not a code-review claim, an actual live HTTP response count. Republished `@coragentic/mcp@0.2.1` to npm with the fix (verified via `npm view @coragentic/mcp dist-tags` → `latest: 0.2.1`).
 
+### Reorg-awareness gap: closed (2026-09-29)
+
+`x402-onchain-verifier.mjs` previously accepted a receipt on `status === 'success'` alone. Two checks were added to `verifyTransaction()`:
+
+1. **RPC chain-id check** — refuses to trust a receipt from an RPC that doesn't report `chainId 4663`, returning `{status: 'unavailable', reason: 'rpc_chain_id_mismatch'}`.
+2. **Confirmation-depth check** — computes `currentBlock - receiptBlock + 1` and requires at least 3 confirmations (configurable via `confirmations` option) before treating a receipt as final, returning `{status: 'unavailable', reason: 'insufficient_confirmations'}` for a too-fresh receipt. This is `unavailable` rather than `invalid` because the payment may be genuine and simply needs more confirmations — callers should retry, not treat it as rejected.
+
+Robinhood Chain produces blocks fast (~10/sec observed live against `robinhood-rpc.publicnode.com`), so 3 confirmations adds negligible real-world latency. 5 new regression tests cover both checks' pass/fail cases; all mock RPC receipts in `x402-settle-route.test.mjs` were updated with a `blockNumber` and `eth_blockNumber` handler so the route-level tests exercise the new checks end-to-end. Deployed live and spot-checked: `/v1/network` and `/v1/offerings/:id/settle` both respond correctly post-deploy.
+
 ### Known gaps (still open)
 
-- **Settlement finality is not reorg-aware.** `x402-onchain-verifier.mjs` accepts a receipt on `status === 'success'` alone, with no confirmation-depth or `eth_chainId` cross-check against the configured RPC. A reorged transaction could in principle be recorded as an irrevocable settlement. Not fixed — would need a confirmation-depth policy decision from the user before implementing.
-- **No worker is deployed in production.** `/health/worker` reports `configured: false` — the worker claim/lease code is tested but not running live, so `CORAGENTIC_JOB_EXECUTOR` has never been exercised end-to-end against real traffic.
+- **No worker is deployed in production.** `/health/worker` reports `configured: false` — the worker claim/lease code is tested but not running live. This is by design, not an oversight: `deploy/EXECUTOR-CONTRACT.md` explicitly documents that Coragentic ships no business executor (the example module throws `Implement this deployment-specific executor before enabling the worker`). Enabling the worker requires the deployment owner to write and configure actual business logic for what jobs do — the server cannot and should not fabricate that on its own, since inventing a fake executor would itself be a fabrication this project's standing rules forbid.
 
 ### Investigated and found NOT exploitable: swarm shared-evidence "race" (2026-09-29)
 
