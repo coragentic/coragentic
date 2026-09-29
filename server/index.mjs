@@ -453,6 +453,15 @@ async function handle(req, res) {
     audit(wallet, 'job', id, 'job_requested', { offeringId: offering.id, paymentStatus: 'unpaid' });
     return json(res, 201, { ok: true, data: jobResponse(db.prepare('SELECT * FROM jobs WHERE id = ?').get(id)) });
   }
+  if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'jobs') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const rows = db.prepare('SELECT j.* FROM jobs j JOIN offerings o ON o.id = j.offering_id WHERE o.agent_id = ? ORDER BY j.updated_at DESC LIMIT 100').all(parts[2]);
+    return json(res, 200, { ok: true, data: rows.map(jobResponse) });
+  }
   if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'jobs' && parts[2]) {
     const wallet = sessionWallet(req);
     if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
