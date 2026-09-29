@@ -64,3 +64,43 @@ test('remote tool calls forward only the explicitly mapped upstream bearer token
   assert.equal(response.status, 200);
   assert.equal(authorization, 'Bearer upstream-contract-token');
 });
+
+test('MCP HTTP responses carry the same security headers the rest of the product sends (no CSP/XFO drift)', async (t) => {
+  const service = createHttpService({
+    env: { CORAGENTIC_MCP_TOKENS: JSON.stringify({ 'contract-token': 'upstream-contract-token' }), CORAGENTIC_API_URL: 'http://127.0.0.1:9' },
+    logger: { error() {} },
+  });
+  const base = await listen(service);
+  t.after(() => service.close());
+
+  const health = await fetch(`${base}/healthz`);
+  for (const header of ['x-content-type-options', 'x-frame-options', 'referrer-policy', 'content-security-policy']) {
+    assert.ok(health.headers.get(header), `expected ${header} on /healthz`);
+  }
+
+  const unauthorized = await post(base, initialize());
+  assert.equal(unauthorized.status, 401);
+  for (const header of ['x-content-type-options', 'x-frame-options', 'referrer-policy', 'content-security-policy']) {
+    assert.ok(unauthorized.headers.get(header), `expected ${header} on 401 /mcp response`);
+  }
+});
+
+test('MCP HTTP transport rate-limits requests instead of accepting unbounded traffic', async (t) => {
+  const service = createHttpService({
+    env: { CORAGENTIC_MCP_TOKENS: JSON.stringify({ 'contract-token': 'upstream-contract-token' }), CORAGENTIC_API_URL: 'http://127.0.0.1:9' },
+    logger: { error() {} },
+    rateLimiter: { limit: 5, windowMs: 60_000 },
+  });
+  const base = await listen(service);
+  t.after(() => service.close());
+
+  const statuses = [];
+  for (let i = 0; i < 8; i += 1) {
+    // eslint-disable-next-line no-await-in-loop
+    statuses.push((await post(base, initialize(), 'not-a-token')).status);
+  }
+  // The first 5 requests (the configured limit) get normal auth handling (401
+  // for a bad token); once the limit is exceeded, further requests from the
+  // same identity must be throttled with 429, never silently accepted forever.
+  assert.ok(statuses.includes(429), `expected at least one 429 among ${JSON.stringify(statuses)}`);
+});
