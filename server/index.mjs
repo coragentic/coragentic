@@ -188,9 +188,15 @@ async function handle(req, res) {
     // Worker writes its own heartbeat; API only reads the record.
     const heartbeat = db.prepare('SELECT ready, reason, updated_at FROM worker_heartbeat LIMIT 1').get() ?? null;
     const configured = typeof process.env.CORAGENTIC_JOB_EXECUTOR === 'string' && Boolean(process.env.CORAGENTIC_JOB_EXECUTOR.trim());
-    const ready = heartbeat?.ready === 1;
+    const heartbeatReady = heartbeat?.ready === 1;
     const stale = heartbeat && (Date.now() - new Date(heartbeat.updated_at).getTime() > 60_000);
-    const data = { configured, ready: ready && !stale, reason: stale ? 'heartbeat_stale' : (heartbeat?.reason ?? (configured ? 'executor_configured_worker_not_running' : 'executor_not_configured')) };
+    const finalReady = heartbeatReady && !stale;
+    // A genuinely ready heartbeat carries reason=null (see worker-entry.mjs's
+    // writeHeartbeat(true)); only fall back to a placeholder explanation when
+    // the worker is NOT actually ready, so ready:true never ships alongside a
+    // contradictory "not running" string.
+    const reason = stale ? 'heartbeat_stale' : finalReady ? null : (heartbeat?.reason ?? (configured ? 'executor_configured_worker_not_running' : 'executor_not_configured'));
+    const data = { configured, ready: finalReady, reason };
     return json(res, data.ready ? 200 : 503, { ok: data.ready, worker: data });
   }
   if (req.method === 'GET' && url.pathname === '/v1/network') {
