@@ -15,6 +15,7 @@ import { createOpenRouterJevAdapterFromEnv } from './jev-openrouter.mjs';
 import { runContextWorker } from './swarm-context-worker.mjs';
 import { AGENT_TEMPLATE_IDS, starterVaultForTemplate, templateCapabilities } from './agent-templates.mjs';
 import { runAgentBrain } from './agent-brain.mjs';
+import { createCustodyWallet } from './agent-custody.mjs';
 import { quoteSwap, previewSwap, swapStatus } from './rh-swap.mjs';
 import { getWorkerReadiness } from './worker-readiness.mjs';
 
@@ -639,6 +640,54 @@ async function handle(req, res) {
     db.prepare('INSERT INTO agent_runs (id, agent_id, owner_wallet, kind, request, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(runId, parts[2], wallet, 'brain', request, JSON.stringify({ ...result, evidenceCount: pack.evidence.length }), timestamp);
     audit(wallet, 'agent_run', runId, 'agent_thought', { agentId: parts[2], evidenceCount: pack.evidence.length });
     return json(res, 201, { ok: true, data: { id: runId, kind: 'brain', request, result: { ...result, evidenceCount: pack.evidence.length }, createdAt: timestamp } });
+  }
+  if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'wallet') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const row = db.prepare('SELECT agent_id, address, policy_json, created_at, updated_at FROM agent_wallets WHERE agent_id = ?').get(parts[2]);
+    return json(res, 200, { ok: true, data: row ? { address: row.address, policy: JSON.parse(row.policy_json), createdAt: row.created_at, updatedAt: row.updated_at } : null });
+  }
+  if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'wallet') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const existing = db.prepare('SELECT agent_id, address, policy_json, created_at, updated_at FROM agent_wallets WHERE agent_id = ?').get(parts[2]);
+    if (existing) return json(res, 200, { ok: true, data: { address: existing.address, policy: JSON.parse(existing.policy_json), createdAt: existing.created_at, updatedAt: existing.updated_at } });
+    if (!process.env.CORAGENTIC_CUSTODY_KEY) return json(res, 503, { ok: false, error: 'custody_not_configured' });
+    const created = createCustodyWallet(process.env.CORAGENTIC_CUSTODY_KEY);
+    const timestamp = new Date().toISOString();
+    const policy = { spendEnabled: false, dailyLimitUsd: 0, allowedSkills: [], requireOwnerApproval: true };
+    db.prepare('INSERT INTO agent_wallets (agent_id, owner_wallet, address, encrypted_private_key, policy_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(parts[2], wallet, created.address, created.encryptedPrivateKey, JSON.stringify(policy), timestamp, timestamp);
+    audit(wallet, 'agent_wallet', parts[2], 'custody_wallet_created', { address: created.address, policy });
+    return json(res, 201, { ok: true, data: { address: created.address, policy, createdAt: timestamp, updatedAt: timestamp } });
+  }
+  if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'skills') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const rows = db.prepare('SELECT skill_id, enabled, config_json, installed_at FROM agent_skills WHERE agent_id = ? ORDER BY installed_at DESC').all(parts[2]);
+    return json(res, 200, { ok: true, data: rows.map((row) => ({ id: row.skill_id, enabled: Boolean(row.enabled), config: JSON.parse(row.config_json), installedAt: row.installed_at })) });
+  }
+  if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'skills') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const body = await readBody(req); const skillId = cleanText(body.skillId, 80);
+    const catalog = new Set(['research-brief', 'swarm-analysis', 'report-writer', 'uniswap']);
+    if (!catalog.has(skillId)) return json(res, 400, { ok: false, error: 'invalid_agent_skill' });
+    const timestamp = new Date().toISOString();
+    db.prepare('INSERT INTO agent_skills (agent_id, owner_wallet, skill_id, enabled, config_json, installed_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, skill_id) DO UPDATE SET enabled=excluded.enabled, config_json=excluded.config_json, installed_at=excluded.installed_at').run(parts[2], wallet, skillId, 1, '{}', timestamp);
+    audit(wallet, 'agent_skill', `${parts[2]}:${skillId}`, 'agent_skill_installed', { agentId: parts[2], skillId });
+    return json(res, 201, { ok: true, data: { id: skillId, enabled: true, config: {}, installedAt: timestamp } });
   }
   if (req.method === 'DELETE' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'memory' && parts[4]) {
     const wallet = sessionWallet(req);

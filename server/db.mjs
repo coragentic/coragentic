@@ -97,6 +97,24 @@ export function openDatabase(path = process.env.CORAGENTIC_DB || 'data/coragenti
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS agent_wallets (
+      agent_id TEXT PRIMARY KEY REFERENCES agents(id),
+      owner_wallet TEXT NOT NULL,
+      address TEXT NOT NULL UNIQUE,
+      encrypted_private_key TEXT NOT NULL,
+      policy_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_skills (
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      owner_wallet TEXT NOT NULL,
+      skill_id TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      config_json TEXT NOT NULL DEFAULT '{}',
+      installed_at TEXT NOT NULL,
+      PRIMARY KEY(agent_id, skill_id)
+    );
     CREATE TABLE IF NOT EXISTS x402_settlements (
       tx_hash TEXT PRIMARY KEY,
       offering_id TEXT NOT NULL REFERENCES offerings(id),
@@ -106,7 +124,12 @@ export function openDatabase(path = process.env.CORAGENTIC_DB || 'data/coragenti
     );
     CREATE INDEX IF NOT EXISTS idx_x402_settlements_offering ON x402_settlements(offering_id);
   `);
-  // job_id binds a settlement to the specific job it pays for, so a single
+  // Legacy agents created before templates had an empty capability array,
+  // which made a real working agent read as "No capabilities declared" even
+  // though its native Brain and context workflow are available. Upgrade the
+  // baseline honestly to the two capabilities every existing agent can use;
+  // template-specific capabilities remain opt-in at creation time.
+  db.prepare("UPDATE agents SET capabilities_json = ? WHERE capabilities_json = '[]'").run(JSON.stringify(['context', 'analysis']));
   // observed transfer cannot be claimed as payment for any other same-price
   // offering; added via ALTER for compatibility with existing databases.
   const settlementColumns = new Set(db.prepare('PRAGMA table_info(x402_settlements)').all().map((row) => row.name));
