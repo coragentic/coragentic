@@ -292,6 +292,14 @@ async function handle(req, res) {
     db.prepare('INSERT INTO auth_challenges (nonce, wallet, message, expires_at) VALUES (?, ?, ?, ?)').run(nonce, wallet, message, expiresAt);
     return json(res, 200, { ok: true, data: { nonce, message, expiresAt } });
   }
+  if (req.method === 'GET' && url.pathname === '/v1/session') {
+    // Cheap whoami so the frontend can verify a STORED bearer token is still
+    // accepted on mount, without relying on a public route (GET /v1/agents
+    // returns 200 regardless of auth and can never surface a stale token).
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    return json(res, 200, { ok: true, data: { wallet } });
+  }
   if (req.method === 'POST' && url.pathname === '/v1/auth/verify') {
     const body = await readBody(req);
     const wallet = normalizeWallet(body.wallet);
