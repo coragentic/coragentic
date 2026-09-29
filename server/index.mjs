@@ -16,6 +16,8 @@ import { runContextWorker } from './swarm-context-worker.mjs';
 import { AGENT_TEMPLATE_IDS, starterVaultForTemplate, templateCapabilities } from './agent-templates.mjs';
 import { runAgentBrain } from './agent-brain.mjs';
 import { createCustodyWallet } from './agent-custody.mjs';
+import { createAutomation, dueAutomations, migrateAutomationSchema } from './agent-automations.mjs';
+import { startAutomationLoop } from './agent-automation-runner.mjs';
 import { quoteSwap, previewSwap, swapStatus } from './rh-swap.mjs';
 import { getWorkerReadiness } from './worker-readiness.mjs';
 
@@ -32,6 +34,7 @@ const db = openDatabase();
 migrateWorkerSchema(db);
 migrateRagSchema(db);
 migrateSwarmSchema(db);
+migrateAutomationSchema(db);
 const requestLimiter = createRateLimiter({ limit: Number(process.env.RATE_LIMIT_PER_MINUTE || 120), windowMs: 60_000 });
 const swarmDecisionAdapter = createOpenRouterJevAdapterFromEnv();
 
@@ -699,6 +702,35 @@ async function handle(req, res) {
     audit(wallet, 'agent_skill', `${parts[2]}:${skillId}`, 'agent_skill_installed', { agentId: parts[2], skillId });
     return json(res, 201, { ok: true, data: { id: skillId, enabled: true, config: {}, installedAt: timestamp } });
   }
+  if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'automations') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const rows = db.prepare('SELECT * FROM agent_automations WHERE agent_id = ? AND owner_wallet = ? ORDER BY created_at DESC').all(parts[2], wallet);
+    return json(res, 200, { ok: true, data: rows.map((row) => ({ id: row.id, task: row.task, schedule: JSON.parse(row.schedule_json), enabled: Boolean(row.enabled), nextRunAt: row.next_run_at, lastRunAt: row.last_run_at, lastResult: row.last_result_json ? JSON.parse(row.last_result_json) : null, createdAt: row.created_at, updatedAt: row.updated_at })) });
+  }
+  if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'automations') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const body = await readBody(req);
+    const task = cleanText(body.task, 2_000);
+    if (!task) return json(res, 400, { ok: false, error: 'automation_task_required' });
+    const schedule = body.schedule && typeof body.schedule === 'object' ? body.schedule : null;
+    if (!schedule) return json(res, 400, { ok: false, error: 'automation_schedule_required' });
+    try {
+      const automation = createAutomation(db, { agentId: parts[2], ownerWallet: wallet, task, schedule });
+      audit(wallet, 'agent_automation', automation.id, 'automation_created', { agentId: parts[2], schedule });
+      return json(res, 201, { ok: true, data: automation });
+    } catch (error) {
+      if (String(error?.message) === 'invalid_automation_schedule') return json(res, 400, { ok: false, error: 'invalid_automation_schedule' });
+      throw error;
+    }
+  }
   if (req.method === 'DELETE' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'memory' && parts[4]) {
     const wallet = sessionWallet(req);
     if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
@@ -775,3 +807,4 @@ const server = createServer((req, res) => {
   });
 });
 server.listen(PORT, () => console.log(`Coragentic API listening on http://127.0.0.1:${PORT}`));
+startAutomationLoop({ db, audit, intervalMs: Number(process.env.CORAGENTIC_AUTOMATION_INTERVAL_MS || 60_000) });
