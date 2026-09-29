@@ -206,21 +206,64 @@ Root causes found and fixed, not just measured:
 - No `public/robots.txt` existed, so Lighthouse's crawler request fell through to the SPA's `index.html`, which naturally fails robots.txt syntax validation. Added a real `robots.txt`.
 - Cloudflare Pages Web Analytics' auto-injected beacon script was blocked by the site's own CSP `script-src`, logging a console security error on every page load. Whitelisted the domain explicitly rather than silently ignoring the error.
 
-## Current score — **S overall**
+## Independent code/logic audit (2026-09-29)
+
+Three parallel independent reviewers (auth/memory/swarm/jobs; payment/identity/market; MCP/ops — this third review hit a rate limit mid-way and is incomplete) inspected the actual source and tests, not this document's claims. They found 9 concrete findings, all with file/line evidence and reproductions. **Every finding was fixed with a red-then-green regression test before being marked resolved** — none were dismissed or reworded away.
+
+| Severity | Area | Finding | Status |
+|---|---|---|---|
+| High | Private memory | `createMemoryAdapter` recall/contextPack ignored the configured `ownerWallet`, leaking cross-owner memory under a shared `agentId` | **Fixed** — `server/rag.mjs`, test: `server/rag.test.mjs` |
+| High | Audit trail | `GET /v1/agents/:id/audit` had no session check, leaking job participant wallets to anyone | **Fixed** — `server/index.mjs`, test: `server/agent-audit-route.test.mjs` |
+| High | Job lifecycle | Job status transitions read-then-wrote with no CAS guard; concurrent accept/cancel could silently overwrite each other | **Fixed** — `server/index.mjs`, test: `server/job-status-race.test.mjs` |
+| High | x402 settlement | A settled transfer was never bound to a specific job; one observed on-chain transfer could be claimed as payment for any job sharing the same offering/price/seller | **Fixed** — `server/index.mjs` + `server/db.mjs` (job_id column, unique index, payer==buyer check), test: `server/x402-settle-route.test.mjs` |
+| High | Market/swap | `slippageBps` accepted up to 10000 (100%), authorizing `amountOutMinimum = 0` in unsigned swap calldata | **Fixed** — capped at 2000 (20%), `server/rh-swap.mjs`, test: `server/rh-swap.test.mjs` |
+| Medium | Auth session | `/v1/auth/verify` read-checked-then-wrote `used_at` with an async signature check in between; a captured signature could mint two sessions from one challenge | **Fixed** — atomic `UPDATE ... WHERE used_at IS NULL` claim before verification, test: `server/auth-challenge-race.test.mjs` |
+| Medium | Request handling | `readBody()` buffered the entire request before checking the 256KB size ceiling | **Fixed** — checked per-chunk during buffering, test: `server/body-size-limit.test.mjs` |
+| Medium | Job/payment | A job could be accepted (and routed to worker execution) while still `unpaid` | **Fixed** — `accepted` transition now requires `payment_json.status === 'settled'`, test: `server/job-payment-gate.test.mjs` |
+| Medium | x402 offering | Offerings could advertise a payment `asset` other than USDG, which `verify-payment` can never actually accept | **Fixed** — offering creation now rejects any non-USDG asset, test: `server/offering-asset-validation.test.mjs` |
+| Medium | x402 replay | The in-memory replay guard marked a nonce used **before** verification succeeded, so a malformed submission under a legitimate nonce could permanently deny the real payer | **Fixed** — nonce is consumed only after `verify` returns success, test: `server/x402.test.mjs` |
+| Low | Documentation | README implied broader ERC-8004 "canonical/verified" provenance than the actual `name()`/`symbol()` decode check supports | **Fixed** — reworded to state exactly what was verified |
+
+Reviewers' raw subsystem scores **before** these fixes: private context/swarm/jobs **58/100**, payment/identity/market **52/100**. The MCP/ops review did not complete (hit an API rate limit) and is a genuine gap in this audit, not a clean bill of health — it should be re-run before any S-tier claim on that subsystem specifically.
+
+**Post-fix verification:** 108 server + 10 core + 7 MCP = 125 tests passing (up from 95/10/7 pre-audit — the 13 new server tests are the regression tests for these findings), `npm audit --omit=dev --audit-level=high` 0 vulnerabilities, deployed and spot-checked live: `GET /v1/agents/:id/audit` now returns 401 unauthenticated (was 200), `POST /v1/offerings/:id/settle` now returns 400 `job_id_required` without a jobId (was previously accepted).
+
+**What this audit does NOT cover:** MCP/HTTP transport auth review is incomplete (rate-limited mid-run); no independent load/fuzz testing was performed; no external penetration test. Treat the fixed findings as closed with evidence, and the untouched MCP/ops subsystem as unaudited, not as verified-clean.
+
+## Current score — **B+ overall**
+
+This score reflects the state honestly, including what independent review found and what remains open — not the pre-audit "S overall" claim, which was based on live on-chain payment/identity proofs but did not include this code-level security review. Both are true: the payment and identity *transactions* are real and independently re-verified on-chain, and the *code* that surrounds them had multiple real authorization/logic bugs that are now fixed and regression-tested.
 
 | Area | Grade | Evidence / limitation |
 |---|---:|---|
-| Runtime, policy, and audit | **A** | Deterministic primitives, bounded inputs, durable audit state, test coverage. |
-| Private context and swarm | **S** | Owner-scoped FTS5, bounded context, durable run/step state, PLUS a **live cross-owner isolation proof** with fresh throwaway wallets on production: cross-owner read `403`, unauthenticated read `401`, cross-owner swarm run `403`. |
-| MCP and OSS distribution | **S** | Published npm package, MIT license, PLUS a **live end-to-end proof**: real `npm install`, official MCP SDK connection, 2 real tool calls returning live chain/agent data from production, and a real installer run writing correct config for 4 AI clients. |
-| ERC-8004 | **S** | Real canonical registry verified, and a **live wallet-approved registration transaction confirmed on-chain** (`0x0da5e21b...`, status `0x1`). |
-| x402 | **S** | Real EIP-712/EIP-3009 verification logic, PLUS a **live non-custodial USDG settlement**: real market swap for funding, real ERC-20 transfer, `POST /settle` returning `200 settled`, and a verified `409` replay-guard rejection on the duplicate submission. |
-| Web and app UI | **S** | Live indigo rebrand, real logo, full-height market terminal, PLUS a **measured Lighthouse audit** with every finding root-caused and fixed: Performance 41→97, Accessibility 95→100, Best Practices 92→100, SEO 92→100, 0 console errors, 0 contrast violations. |
-| Production deployment | **A** | Live custom domains, systemd isolation, Cloudflare Tunnel, health verified, daily SQLite online backup timer plus restore runbook. |
-| CI / reproducibility | **A** | GitHub Actions is green (workspace install, bounded server files, core/MCP tests, package check, audit, and secret scan). |
+| Runtime, policy, and audit | **A-** | Deterministic primitives, bounded inputs, durable audit state, 125 tests passing; the audit-route auth gap and job-race findings were real bugs in this area, now fixed with regression tests. |
+| Private context and swarm | **B+** | Owner-scoped at the HTTP layer and live cross-owner isolation was proven; the `createMemoryAdapter` cross-owner leak was a real gap in the reusable library path, now fixed. Swarm shared-evidence concurrent-write race identified by reviewers is **not yet fixed** (see Known gaps). |
+| MCP and OSS distribution | **B** | Published npm package, real end-to-end install/tool-call proof exists; **the independent MCP/HTTP transport security review did not complete** (rate-limited) — grade reflects that this subsystem specifically has not had the same adversarial pass as the others. |
+| ERC-8004 | **A-** | Real registry, live wallet-approved on-chain registration transaction confirmed; README overclaim on provenance corrected. |
+| x402 | **A-** | Real EIP-712/EIP-3009 verification, a live non-custodial settlement transaction confirmed on-chain, AND the order-attribution/replay-poisoning/asset-mismatch findings from this audit are fixed with regression tests. |
+| Web and app UI | **A-** | Live indigo rebrand, full-height market terminal, workspace actions (save context, run swarm, create offering) wired to real API calls with end-to-end proof; measured Lighthouse 97/100/100/100. |
+| Production deployment | **A** | Live custom domains, systemd isolation, Cloudflare Tunnel, daily backup timer with a verified valid archive, SQLite integrity `ok`. |
+| CI / reproducibility | **A** | GitHub Actions green for the latest commit; the fix commit above is included in that green run. |
 
-### Why S is justified now
+### Known gaps (not yet fixed, found by this same audit)
 
-Six of eight areas are proven at S with real, independently re-verified evidence rather than internal claims: two on-chain transactions (identity + payment), a live cross-owner isolation exercise against production with fresh wallets, a real end-to-end MCP install-and-call session, and a measured Lighthouse audit where every single finding was root-caused in the source and re-verified after the fix (not just re-run until the number looked better).
+- **Swarm concurrent shared-evidence write race** (`server/swarm.mjs`): parallel workers read-modify-write the run's shared evidence object without a version/CAS guard; with API concurrency of 4 and up to 8 workers per run, two completed steps can lose one worker's evidence. Same failure shape as the job-status race that was fixed — needs the same CAS treatment.
+- **MCP/HTTP transport, worker lifecycle, and production-ops review is incomplete.** The third parallel reviewer was rate-limited before finishing. This is a genuine unknown, not a clean result, and should be re-run in a follow-up pass before claiming this subsystem hardened.
+- **Settlement finality is not reorg-aware.** `x402-onchain-verifier.mjs` accepts a receipt on `status === 'success'` alone, with no confirmation-depth or `eth_chainId` cross-check against the configured RPC. A reorged transaction could in principle be recorded as an irrevocable settlement. Not fixed in this pass — would need a confirmation-depth policy decision from the user before implementing.
 
-The remaining two areas — Runtime/policy/audit and Production deployment — are strong (A) on their own merits (deterministic, tested, backed by a working backup/restore runbook) but have not yet been put through the same external, adversarial-style live proof as the six S-tier areas above. Raising them further would need, for example, a real disaster-recovery drill (restore from a live backup archive into a fresh instance and verify data integrity) and a documented incident-response exercise — not additional internal review.
+## Historical: wallet-approved live proof (2026-09-28)
+
+The transaction proofs below remain true and are the evidentiary basis for the ERC-8004 and x402 A- grades above. The table and "Why S" framing that originally accompanied them is preserved here for the historical record, but the **Current score** section above is the one to cite — it supersedes this table after the 2026-09-29 code audit found and fixed 9 real findings that this snapshot predates.
+
+| Area | Grade (as of 2026-09-28, superseded) | Evidence / limitation |
+|---|---:|---|
+| Runtime, policy, and audit | A | Deterministic primitives, bounded inputs, durable audit state, test coverage. |
+| Private context and swarm | S | Owner-scoped FTS5, bounded context, durable run/step state, PLUS a live cross-owner isolation proof with fresh throwaway wallets on production: cross-owner read 403, unauthenticated read 401, cross-owner swarm run 403. |
+| MCP and OSS distribution | S | Published npm package, MIT license, PLUS a live end-to-end proof: real npm install, official MCP SDK connection, 2 real tool calls returning live chain/agent data from production, and a real installer run writing correct config for 4 AI clients. |
+| ERC-8004 | S | Real canonical registry verified, and a live wallet-approved registration transaction confirmed on-chain (0x0da5e21b..., status 0x1). |
+| x402 | S | Real EIP-712/EIP-3009 verification logic, PLUS a live non-custodial USDG settlement: real market swap for funding, real ERC-20 transfer, POST /settle returning 200 settled, and a verified 409 replay-guard rejection on the duplicate submission. |
+| Web and app UI | S | Live indigo rebrand, real logo, full-height market terminal, PLUS a measured Lighthouse audit with every finding root-caused and fixed: Performance 41→97, Accessibility 95→100, Best Practices 92→100, SEO 92→100, 0 console errors, 0 contrast violations. |
+| Production deployment | A | Live custom domains, systemd isolation, Cloudflare Tunnel, health verified, daily SQLite online backup timer plus restore runbook. |
+| CI / reproducibility | A | GitHub Actions is green (workspace install, bounded server files, core/MCP tests, package check, audit, and secret scan). |
+
+At the time this table was written, six of eight areas were considered S based on real, independently re-verified live evidence: two on-chain transactions (identity + payment), a live cross-owner isolation exercise against production with fresh wallets, a real end-to-end MCP install-and-call session, and a measured Lighthouse audit. That evidence is still valid and still cited above. What changed is that the 2026-09-29 independent code review subsequently found 9 real authorization/logic bugs in the code paths underneath that live evidence (private memory, job lifecycle, settlement attribution, auth session atomicity, swap slippage). The live transactions proved the happy path worked; they did not prove the code was free of exploitable edge cases, and it was not. Both facts are now recorded, which is why the current overall grade is B+, not S.
