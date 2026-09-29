@@ -29,14 +29,23 @@ export function createDirectTransferFacilitator({
       fetchOptions: { headers: { 'user-agent': 'coragentic-x402-facilitator/1.0' } },
     }),
   }),
+  // Minimum block confirmations before a settlement is accepted as final. A
+  // freshly-mined block can still be reorged out; requiring a small depth of
+  // confirmation before recording an irrevocable settlement bounds that risk.
+  // Robinhood Chain block time and finality characteristics haven't published
+  // a formal finality guarantee, so this defaults conservatively; callers can
+  // override it explicitly if a different policy is chosen.
+  confirmations = 3,
 } = {}) {
   return {
     /**
      * Verify that `txHash` is a successful on-chain transaction containing an
      * ERC20 Transfer log on `requirement.accepts[0].asset` paying at least
-     * `requirement.accepts[0].amount` to `requirement.accepts[0].payTo`.
-     * Returns { status: 'verified', payer, txHash } | { status: 'invalid', reason } |
-     * { status: 'unavailable', reason }.
+     * `requirement.accepts[0].amount` to `requirement.accepts[0].payTo`, that
+     * the receipt is buried under at least `confirmations` blocks, and that
+     * the RPC being queried actually reports the expected chain id.
+     * Returns { status: 'verified', payer, txHash, amount, confirmations } |
+     * { status: 'invalid', reason } | { status: 'unavailable', reason }.
      */
     async verifyTransaction(txHash, requirement) {
       if (!isTxHash(txHash)) return { status: 'invalid', reason: 'malformed_tx_hash' };
@@ -46,6 +55,17 @@ export function createDirectTransferFacilitator({
         : null;
       if (!accept) return { status: 'invalid', reason: 'no_matching_requirement' };
 
+      // Refuse to trust an RPC that doesn't actually report the chain we think
+      // we're settling on -- a misconfigured or malicious RPC endpoint could
+      // otherwise return a receipt for the same tx hash on a different chain.
+      let reportedChainId;
+      try {
+        reportedChainId = await publicClient.getChainId();
+      } catch {
+        return { status: 'unavailable', reason: 'rpc_unavailable' };
+      }
+      if (Number(reportedChainId) !== CHAIN_ID) return { status: 'unavailable', reason: 'rpc_chain_id_mismatch' };
+
       let receipt;
       try {
         receipt = await publicClient.getTransactionReceipt({ hash: txHash });
@@ -54,6 +74,23 @@ export function createDirectTransferFacilitator({
       }
       if (!receipt) return { status: 'invalid', reason: 'transaction_not_found' };
       if (receipt.status !== 'success') return { status: 'invalid', reason: 'transaction_failed' };
+
+      // Confirmation-depth check: a receipt that exists but is still within the
+      // reorg-risk window must not be treated as final. This is deliberately
+      // 'unavailable' rather than 'invalid' -- the payment may well be genuine
+      // and simply needs more time, so the caller should retry rather than
+      // treat it as a rejected/failed payment.
+      let currentBlock;
+      try {
+        currentBlock = await publicClient.getBlockNumber();
+      } catch {
+        return { status: 'unavailable', reason: 'rpc_unavailable' };
+      }
+      const receiptBlock = BigInt(receipt.blockNumber);
+      const actualConfirmations = Number(BigInt(currentBlock) - receiptBlock) + 1;
+      if (actualConfirmations < confirmations) {
+        return { status: 'unavailable', reason: 'insufficient_confirmations' };
+      }
 
       const assetLower = accept.asset.toLowerCase();
       const payToLower = accept.payTo.toLowerCase();
@@ -69,7 +106,7 @@ export function createDirectTransferFacilitator({
         if (value >= requiredAmount) {
           const fromTopic = log.topics[1];
           const payer = fromTopic ? `0x${fromTopic.slice(26)}` : null;
-          return { status: 'verified', payer, txHash, amount: value.toString() };
+          return { status: 'verified', payer, txHash, amount: value.toString(), confirmations: actualConfirmations };
         }
       }
       return { status: 'invalid', reason: 'no_matching_transfer_log' };

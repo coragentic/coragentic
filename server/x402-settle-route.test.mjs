@@ -38,7 +38,7 @@ function seed(path) {
 // returns a canned transaction receipt, so the full route (DB lookup, requirement
 // construction, on-chain verification, replay-guard insert, audit event) is exercised
 // exactly as it runs in production — only the RPC transport is faked.
-async function startMockRpc(receiptForHash) {
+async function startMockRpc(receiptForHash, { blockNumber = '0x3ec' } = {}) {
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => { body += chunk; });
@@ -46,6 +46,12 @@ async function startMockRpc(receiptForHash) {
       const parsed = JSON.parse(body);
       if (parsed.method === 'eth_chainId') {
         res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: '0x1237' }));
+        return;
+      }
+      if (parsed.method === 'eth_blockNumber') {
+        // Comfortably ahead of the receipt's block so the confirmation-depth
+        // check in x402-onchain-verifier.mjs passes with room to spare.
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: parsed.id, result: blockNumber }));
         return;
       }
       if (parsed.method === 'eth_getTransactionReceipt') {
@@ -86,7 +92,7 @@ test('settle verifies a real successful transfer receipt and records it, then re
   const path = join(dir, 'db.sqlite'); seed(path);
   const txHash = `0x${'aa'.repeat(32)}`;
   const receipt = {
-    status: '0x1',
+    status: '0x1', blockNumber: '0x3e8',
     logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(1_000_000n).toString(16)}` }],
   };
   const { server: rpcServer, url: rpcUrl } = await startMockRpc(() => receipt);
@@ -117,7 +123,7 @@ test('settle rejects an underpaying transaction and never records it', async () 
   const path = join(dir, 'db.sqlite'); seed(path);
   const txHash = `0x${'bb'.repeat(32)}`;
   const receipt = {
-    status: '0x1',
+    status: '0x1', blockNumber: '0x3e8',
     logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(500_000n).toString(16)}` }],
   };
   const { server: rpcServer, url: rpcUrl } = await startMockRpc(() => receipt);
@@ -150,7 +156,7 @@ test('a settled transfer is bound to one specific job and cannot be claimed for 
   db.close();
 
   const txHash = `0x${'cc'.repeat(32)}`;
-  const receipt = { status: '0x1', logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(1_000_000n).toString(16)}` }] };
+  const receipt = { status: '0x1', blockNumber: '0x3e8', logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(1_000_000n).toString(16)}` }] };
   const { server: rpcServer, url: rpcUrl } = await startMockRpc(() => receipt);
   const { child, base } = await start(path, rpcUrl);
   try {
@@ -184,7 +190,7 @@ test('settle without a jobId is rejected -- payment must be bound to a specific 
   const dir = mkdtempSync(join(tmpdir(), 'coragentic-settle-nojobid-'));
   const path = join(dir, 'db.sqlite'); seed(path);
   const txHash = `0x${'dd'.repeat(32)}`;
-  const receipt = { status: '0x1', logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(1_000_000n).toString(16)}` }] };
+  const receipt = { status: '0x1', blockNumber: '0x3e8', logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(1_000_000n).toString(16)}` }] };
   const { server: rpcServer, url: rpcUrl } = await startMockRpc(() => receipt);
   const { child, base } = await start(path, rpcUrl);
   try {
