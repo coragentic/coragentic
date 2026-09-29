@@ -40,7 +40,17 @@ export function startAutomationLoop({ db, audit, intervalMs }) {
   const timer = setInterval(() => {
     if (running) return;
     running = true;
-    void runDueAutomations({ db, audit }).finally(() => { running = false; });
+    void (async () => {
+      // Swap automations first (real on-chain execution when policy allows),
+      // then brain automations.
+      try {
+        const { executeDueSwapAutomations } = await import('./agent-swap-automations.mjs');
+        await executeDueSwapAutomations({ db, masterKey: process.env.CORAGENTIC_CUSTODY_KEY });
+      } catch (error) {
+        console.error('swap automation cycle failed', error);
+      }
+      await runDueAutomations({ db, audit });
+    })().finally(() => { running = false; });
   }, intervalMs);
   return () => clearInterval(timer);
 }

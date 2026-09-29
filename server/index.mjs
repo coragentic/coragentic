@@ -18,6 +18,7 @@ import { runAgentBrain } from './agent-brain.mjs';
 import { createCustodyWallet } from './agent-custody.mjs';
 import { createAutomation, dueAutomations, migrateAutomationSchema } from './agent-automations.mjs';
 import { startAutomationLoop } from './agent-automation-runner.mjs';
+import { parseSwapCommand } from './agent-swap-automations.mjs';
 import { quoteSwap, previewSwap, swapStatus } from './rh-swap.mjs';
 import { getWorkerReadiness } from './worker-readiness.mjs';
 
@@ -715,11 +716,24 @@ async function handle(req, res) {
     // IDs as proof of grounding.
     const allowedEvidenceIds = new Set(pack.evidence.map((item) => item.id));
     result.citedEvidenceIds = result.citedEvidenceIds.filter((id) => allowedEvidenceIds.has(id));
+    // Chat can command recurring swaps: "swap eth to usdg 0.01 everyday".
+    // When the request parses as a swap command, create a durable automation
+    // bound to this agent; the swap runner executes it on custody funds when
+    // due. The brain run records the command + the automation it created.
+    let createdSwapAutomationId = null;
+    const swapCommand = parseSwapCommand(request, { agentId: parts[2] });
+    if (swapCommand && swapCommand.recurring) {
+      try {
+        const automation = createAutomation(db, { agentId: parts[2], ownerWallet: wallet, task: `swap ${swapCommand.tokenInSymbol} to ${swapCommand.tokenOutSymbol} ${swapCommand.amountEth}${swapCommand.recurring ? ' daily' : ''}`, schedule: swapCommand.schedule });
+        createdSwapAutomationId = automation.id;
+        audit(wallet, 'agent_automation', automation.id, 'automation_created_from_chat', { agentId: parts[2], task: automation.task, schedule: swapCommand.schedule });
+      } catch { /* duplicate key etc: automation already exists for this command */ }
+    }
     const timestamp = new Date().toISOString();
     const runId = randomUUID();
-    db.prepare('INSERT INTO agent_runs (id, agent_id, owner_wallet, kind, request, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(runId, parts[2], wallet, 'brain', request, JSON.stringify({ ...result, evidenceCount: pack.evidence.length }), timestamp);
+    db.prepare('INSERT INTO agent_runs (id, agent_id, owner_wallet, kind, request, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(runId, parts[2], wallet, 'brain', request, JSON.stringify({ ...result, evidenceCount: pack.evidence.length, createdSwapAutomationId }), timestamp);
     audit(wallet, 'agent_run', runId, 'agent_thought', { agentId: parts[2], evidenceCount: pack.evidence.length });
-    return json(res, 201, { ok: true, data: { id: runId, kind: 'brain', request, result: { ...result, evidenceCount: pack.evidence.length }, createdAt: timestamp } });
+    return json(res, 201, { ok: true, data: { id: runId, kind: 'brain', request, result: { ...result, evidenceCount: pack.evidence.length, createdSwapAutomationId }, createdAt: timestamp } });
   }
   if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'wallet') {
     const wallet = sessionWallet(req);
