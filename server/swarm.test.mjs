@@ -24,6 +24,27 @@ test('persists runs, steps, shared evidence, and audit events', () => {
   assert.equal(database.prepare('SELECT count(*) AS n FROM audit_events WHERE entity_id = ?').get(runId).n, 3);
 });
 
+// listSteps/getStep power the Swarms UI's run-detail view, which reads
+// step.stepKey (camelCase) directly. The DB column is step_key (snake_case);
+// without mapping it, every step row has stepKey === undefined and the
+// frontend's step.stepKey.replace(...) throws, taking the whole page blank
+// (reproduced live: /app/swarms rendered pure black with a console
+// TypeError "Cannot read properties of undefined (reading 'replace')").
+test('listSteps and getStep expose camelCase stepKey, not just the raw step_key column', () => {
+  const database = db();
+  const state = new SwarmState(database);
+  const runId = state.createRun({ goal: 'ship', sharedEvidence: {} });
+  state.upsertStep(runId, { key: 'worker:alpha', input: {}, status: 'completed' });
+
+  const listed = state.listSteps(runId);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].stepKey, 'worker:alpha');
+  assert.equal(typeof listed[0].step_key, 'undefined', 'raw snake_case column should not leak to API consumers');
+
+  const single = state.getStep(runId, 'worker:alpha');
+  assert.equal(single.stepKey, 'worker:alpha');
+});
+
 test('routes through injected choice and deterministic fallback', async () => {
   const seen = [];
   const routed = await new CapabilityRouter({ choice: async (p) => { seen.push(p); return 'b'; } }).choose({ goal: 'g', candidates: ['a', 'b'] });

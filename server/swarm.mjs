@@ -7,6 +7,28 @@ const parse = (value, fallback = {}) => {
   try { return value == null ? fallback : JSON.parse(value); } catch { return fallback; }
 };
 
+// Maps a raw swarm_steps row (snake_case DB columns) to the camelCase shape
+// every API consumer (the /v1/swarm/:id route, the Swarms UI) actually
+// reads. Without this, step.stepKey is undefined -- the DB column is
+// step_key -- and the frontend's step.stepKey.replace(...) throws, blanking
+// the whole page (reproduced live on /app/swarms).
+function stepResponse(row) {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    stepKey: row.step_key,
+    status: row.status,
+    input: parse(row.input_json),
+    output: parse(row.output_json, null),
+    score: row.score,
+    error: row.error,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    updatedAt: row.updated_at,
+    decisionProvider: row.decision_provider,
+  };
+}
+
 export function migrateSwarmSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS swarm_runs (
@@ -77,10 +99,10 @@ export class SwarmState {
 
   getStep(runId, stepKey) {
     const row = this.db.prepare('SELECT * FROM swarm_steps WHERE run_id = ? AND step_key = ?').get(runId, stepKey);
-    return row && { ...row, input: parse(row.input_json), output: parse(row.output_json, null) };
+    return row && stepResponse(row);
   }
 
-  listSteps(runId) { return this.db.prepare('SELECT * FROM swarm_steps WHERE run_id = ? ORDER BY rowid').all(runId).map((row) => ({ ...row, input: parse(row.input_json), output: parse(row.output_json, null) })); }
+  listSteps(runId) { return this.db.prepare('SELECT * FROM swarm_steps WHERE run_id = ? ORDER BY rowid').all(runId).map(stepResponse); }
 
   upsertStep(runId, step, patch = {}) {
     const key = step.key ?? step.stepKey;
@@ -93,7 +115,7 @@ export class SwarmState {
         .run(randomUUID(), runId, key, value.status, json(value.input), value.output === undefined ? null : json(value.output), value.score, value.error, value.startedAt ?? null, value.completedAt ?? null, stamp, value.decisionProvider ?? null);
     } else {
       this.db.prepare('UPDATE swarm_steps SET status = ?, input_json = ?, output_json = ?, score = ?, error = ?, started_at = ?, completed_at = ?, updated_at = ?, decision_provider = ? WHERE run_id = ? AND step_key = ?')
-        .run(value.status, json(value.input ?? previous.input), value.output === undefined ? (previous.output == null ? null : json(previous.output)) : json(value.output), value.score ?? previous.score, value.error ?? previous.error, value.startedAt ?? previous.started_at, value.completedAt ?? previous.completed_at, stamp, value.decisionProvider ?? previous.decision_provider ?? null, runId, key);
+        .run(value.status, json(value.input ?? previous.input), value.output === undefined ? (previous.output == null ? null : json(previous.output)) : json(value.output), value.score ?? previous.score, value.error ?? previous.error, value.startedAt ?? previous.startedAt, value.completedAt ?? previous.completedAt, stamp, value.decisionProvider ?? previous.decisionProvider ?? null, runId, key);
     }
     this.audit(runId, 'swarm_step_updated', { stepKey: key, status: value.status });
     return this.getStep(runId, key);
