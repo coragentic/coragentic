@@ -96,6 +96,12 @@ export function openDatabase(path = process.env.CORAGENTIC_DB || 'data/coragenti
     );
     CREATE INDEX IF NOT EXISTS idx_x402_settlements_offering ON x402_settlements(offering_id);
   `);
+  // job_id binds a settlement to the specific job it pays for, so a single
+  // observed transfer cannot be claimed as payment for any other same-price
+  // offering; added via ALTER for compatibility with existing databases.
+  const settlementColumns = new Set(db.prepare('PRAGMA table_info(x402_settlements)').all().map((row) => row.name));
+  if (!settlementColumns.has('job_id')) db.exec('ALTER TABLE x402_settlements ADD COLUMN job_id TEXT REFERENCES jobs(id)');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_x402_settlements_job ON x402_settlements(job_id) WHERE job_id IS NOT NULL');
   return db;
 }
 

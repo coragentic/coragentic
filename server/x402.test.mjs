@@ -64,3 +64,30 @@ test('documents that settlement is blocked until a real facilitator exists', () 
   assert.match(FACILITATOR_BLOCKER, /facilitator/i);
   assert.match(FACILITATOR_BLOCKER, /no fake settlement/i);
 });
+
+test('an attacker cannot poison a legitimate nonce by submitting a malformed authorization under it first', async () => {
+  // The replay guard must not consume/mark a nonce as used until the
+  // underlying authorization actually verifies. Otherwise an attacker who
+  // merely knows a legitimate wrapper nonce (e.g. observed in a prior request)
+  // can submit garbage under that same nonce and get the real payment
+  // rejected with nonce_replayed for the rest of the process lifetime --
+  // a denial-of-service on someone else's valid payment.
+  let verifyCalls = 0;
+  const boundary = createX402Boundary({
+    verify: async (parsed) => {
+      verifyCalls += 1;
+      // Simulate: the first submission under this nonce is bad crypto (attacker
+      // noise); the second submission under the SAME nonce is the real payer's
+      // legitimate authorization and must still be able to succeed.
+      if (verifyCalls === 1) return { valid: false, reason: 'bad_signature' };
+      return { valid: true, payer: '0xpayer' };
+    },
+  });
+  const attackerAttempt = await boundary.verifyPayment(encoded(payment), requirement);
+  assert.equal(attackerAttempt.status, 'invalid');
+  assert.equal(attackerAttempt.reason, 'bad_signature');
+
+  const legitimateAttempt = await boundary.verifyPayment(encoded(payment), requirement);
+  assert.equal(legitimateAttempt.status, 'verified');
+  assert.equal(legitimateAttempt.payer, '0xpayer');
+});

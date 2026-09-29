@@ -6,7 +6,7 @@ import { migrateWorkerSchema } from './worker.mjs';
 import { createRegistrationPayload, hashRegistrationPayload, registrationURI, buildRegisterCall, IDENTITY_REGISTRY_ADDRESS } from './identity.mjs';
 import { createPaymentRequired, createX402Boundary, parsePaymentSignature, NETWORK as X402_NETWORK } from './x402.mjs';
 import { createUsdgFacilitator } from './x402-facilitator.mjs';
-import { createDirectTransferFacilitator } from './x402-onchain-verifier.mjs';
+import { createDirectTransferFacilitator, USDG_ADDRESS as USDG_SETTLEMENT_ADDRESS } from './x402-onchain-verifier.mjs';
 import { createRateLimiter, getCorsHeaders, getSecurityHeaders, formatPublicError } from './security.mjs';
 import { migrateRagSchema, indexMemory, recall as ragRecall } from './rag.mjs';
 import { buildAgentCard, buildMcpManifest } from './interoperability.mjs';
@@ -69,9 +69,17 @@ const json = (res, status, body) => {
 };
 
 const readBody = async (req) => {
-  let raw = '';
-  for await (const chunk of req) raw += chunk;
-  if (raw.length > 256_000) throw new Error('request body too large');
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of req) {
+    length += chunk.length;
+    // Reject before buffering further: an attacker streaming a huge chunked
+    // body must not be able to force unbounded memory allocation just because
+    // the 256KB ceiling was only checked after the whole stream finished.
+    if (length > 256_000) throw new Error('request body too large');
+    chunks.push(chunk);
+  }
+  const raw = Buffer.concat(chunks).toString('utf8');
   return raw ? JSON.parse(raw) : {};
 };
 
@@ -286,10 +294,16 @@ async function handle(req, res) {
     if (!wallet || !signature || !nonce) return json(res, 400, { ok: false, error: 'wallet_signature_nonce_required' });
     const challenge = db.prepare('SELECT * FROM auth_challenges WHERE nonce = ? AND wallet = ?').get(nonce, wallet);
     if (!challenge || challenge.used_at || challenge.expires_at < now()) return json(res, 401, { ok: false, error: 'challenge_invalid_or_expired' });
+    // Atomically claim the challenge BEFORE the async signature check: verifyMessage
+    // yields the event loop, so two concurrent /verify calls for the same nonce can
+    // both pass the SELECT-based check above before either writes used_at. Guarding
+    // the UPDATE on used_at IS NULL turns that into a clean single winner -- the
+    // loser's claim affects 0 rows and is rejected, instead of both minting a session.
+    const claim = db.prepare('UPDATE auth_challenges SET used_at = ? WHERE nonce = ? AND wallet = ? AND used_at IS NULL AND expires_at >= ?').run(now(), nonce, wallet, now());
+    if (claim.changes === 0) return json(res, 401, { ok: false, error: 'challenge_invalid_or_expired' });
     let valid = false;
     try { valid = await verifyMessage({ address: wallet, message: challenge.message, signature }); } catch { valid = false; }
     if (!valid) return json(res, 401, { ok: false, error: 'signature_invalid' });
-    db.prepare('UPDATE auth_challenges SET used_at = ? WHERE nonce = ?').run(now(), nonce);
     const token = randomBytes(32).toString('hex');
     db.prepare('INSERT INTO sessions (token_hash, wallet, expires_at) VALUES (?, ?, ?)').run(hash(token), wallet, now() + SESSION_TTL_MS);
     return json(res, 200, { ok: true, data: { token, wallet, expiresAt: now() + SESSION_TTL_MS } });
@@ -370,6 +384,12 @@ async function handle(req, res) {
     if (!name || !description || !priceAtomic || !asset || !network || !requirements || !deliverables) {
       return json(res, 400, { ok: false, error: 'invalid_offering' });
     }
+    // Only USDG is actually accepted end to end: verify-payment (EIP-3009) and
+    // settle (direct transfer) both hardcode USDG. Advertising any other asset
+    // here would publish an x402 requirement that can never be honored.
+    if (asset.toLowerCase() !== USDG_SETTLEMENT_ADDRESS.toLowerCase()) {
+      return json(res, 400, { ok: false, error: 'unsupported_asset' });
+    }
     const id = randomUUID();
     const timestamp = new Date().toISOString();
     db.prepare('INSERT INTO offerings (id, agent_id, owner_wallet, name, description, price_atomic, asset, network, requirements_json, deliverables_json, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
@@ -414,6 +434,13 @@ async function handle(req, res) {
     const body = await readBody(req);
     const txHash = typeof body.txHash === 'string' ? body.txHash : null;
     if (!txHash) return json(res, 400, { ok: false, error: 'tx_hash_required' });
+    // A settlement must be bound to a specific job, not just "some job at this
+    // offering's price". Without this, one observed on-chain transfer could be
+    // claimed as payment for any job sharing the same offering/price/seller.
+    const jobId = typeof body.jobId === 'string' ? body.jobId : null;
+    if (!jobId) return json(res, 400, { ok: false, error: 'job_id_required' });
+    const job = db.prepare('SELECT * FROM jobs WHERE id = ? AND offering_id = ?').get(jobId, offering.id);
+    if (!job) return json(res, 404, { ok: false, error: 'job_not_found' });
     const requirement = createPaymentRequired({
       amount: offering.price_atomic,
       asset: offering.asset,
@@ -426,16 +453,26 @@ async function handle(req, res) {
       const status = result.status === 'unavailable' ? 503 : 402;
       return json(res, status, { ok: false, data: result });
     }
-    // Atomic replay guard: tx_hash is PRIMARY KEY, so a concurrent duplicate settle
-    // fails at the database layer, not via a check-then-act race in application code.
+    // The verified payer must actually be this job's buyer -- otherwise a
+    // seller's own transfer (or a third party's) could settle someone else's
+    // job. Combined with the job_id uniqueness index below, this closes the
+    // order-attribution gap: one transfer settles exactly one job, for its
+    // actual buyer, and only once.
+    if (result.payer.toLowerCase() !== job.buyer_wallet.toLowerCase()) {
+      return json(res, 403, { ok: false, error: 'payer_does_not_match_job_buyer' });
+    }
+    // Atomic replay guard: tx_hash is PRIMARY KEY, and job_id has a unique
+    // index, so a concurrent duplicate settle (of the same tx OR against a
+    // second job) fails at the database layer, not via app-level check-then-act.
     try {
-      db.prepare('INSERT INTO x402_settlements (tx_hash, offering_id, payer_wallet, amount_atomic, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(txHash, offering.id, result.payer, result.amount, new Date().toISOString());
+      db.prepare('INSERT INTO x402_settlements (tx_hash, offering_id, payer_wallet, amount_atomic, created_at, job_id) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(txHash, offering.id, result.payer, result.amount, new Date().toISOString(), jobId);
     } catch {
       return json(res, 409, { ok: false, error: 'transaction_already_settled' });
     }
-    audit(result.payer, 'offering', offering.id, 'x402_settled', { txHash, amount: result.amount });
-    return json(res, 200, { ok: true, data: { status: 'settled', txHash, payer: result.payer, amount: result.amount, offeringId: offering.id } });
+    db.prepare('UPDATE jobs SET payment_json = ? WHERE id = ?').run(JSON.stringify({ status: 'settled', txHash, amount: result.amount }), jobId);
+    audit(result.payer, 'offering', offering.id, 'x402_settled', { txHash, amount: result.amount, jobId });
+    return json(res, 200, { ok: true, data: { status: 'settled', txHash, payer: result.payer, amount: result.amount, offeringId: offering.id, jobId } });
   }
   if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'offerings' && parts[2] && parts[3] === 'jobs') {
     const wallet = sessionWallet(req);
@@ -483,6 +520,14 @@ async function handle(req, res) {
       submitted: { completed: row.buyer_wallet },
     };
     if (!next || transitions[row.status]?.[next] !== wallet) return json(res, 409, { ok: false, error: 'invalid_status_transition' });
+    // A job cannot proceed to worker execution until its payment has actually
+    // settled -- otherwise the worker can deliver paid work for free, since
+    // execution was previously gated only on the requested->accepted actor
+    // check and never checked payment_json at all.
+    if (next === 'accepted') {
+      const paymentStatus = JSON.parse(row.payment_json).status;
+      if (paymentStatus !== 'settled') return json(res, 409, { ok: false, error: 'payment_not_settled' });
+    }
     let deliverable = row.deliverable_json;
     if (next === 'submitted') {
       deliverable = jsonValue(body.deliverable);
@@ -491,7 +536,12 @@ async function handle(req, res) {
       return json(res, 400, { ok: false, error: 'deliverable_not_allowed' });
     }
     const timestamp = new Date().toISOString();
-    db.prepare('UPDATE jobs SET status = ?, deliverable_json = ?, updated_at = ? WHERE id = ?').run(next, deliverable, timestamp, row.id);
+    // Compare-and-swap on the prior status: readBody() above yields the event
+    // loop, so a concurrent request can read the same stale row before this
+    // write lands. Guarding the UPDATE on status = row.status turns a lost
+    // update into a clean 409 for whichever request loses the race.
+    const result = db.prepare('UPDATE jobs SET status = ?, deliverable_json = ?, updated_at = ? WHERE id = ? AND status = ?').run(next, deliverable, timestamp, row.id, row.status);
+    if (result.changes === 0) return json(res, 409, { ok: false, error: 'invalid_status_transition' });
     audit(wallet, 'job', row.id, `job_${next}`, { from: row.status, to: next });
     return json(res, 200, { ok: true, data: jobResponse(db.prepare('SELECT * FROM jobs WHERE id = ?').get(row.id)) });
   }
@@ -542,8 +592,11 @@ async function handle(req, res) {
   }
 
   if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'audit') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
     const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
     if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
     const rows = db.prepare("SELECT id, actor_wallet, entity_type, entity_id, event_type, created_at FROM audit_events WHERE (entity_type = 'offering' AND entity_id IN (SELECT id FROM offerings WHERE agent_id = ?)) OR (entity_type = 'job' AND entity_id IN (SELECT j.id FROM jobs j JOIN offerings o ON o.id = j.offering_id WHERE o.agent_id = ?)) OR (entity_type = 'agent' AND entity_id = ?) ORDER BY created_at DESC").all(parts[2], parts[2], parts[2]);
     return json(res, 200, { ok: true, data: rows.map((event) => ({ id: event.id, actor: event.actor_wallet, entityType: event.entity_type, entityId: event.entity_id, eventType: event.event_type, createdAt: event.created_at })), total: rows.length });
   }

@@ -61,11 +61,19 @@ export const safeParseSignature = parsePaymentSignature;
 export function createReplayGuard({ now = () => Date.now() } = {}) {
   const used = new Set();
   return {
-    checkAndUse({ nonce, expiresAt } = {}) {
+    check({ nonce, expiresAt } = {}) {
       if (!nonEmpty(nonce) || !Number.isFinite(expiresAt)) return { ok: false, reason: 'malformed_payment' };
       if (expiresAt <= now()) return { ok: false, reason: 'payment_expired' };
       if (used.has(nonce)) return { ok: false, reason: 'nonce_replayed' };
-      used.add(nonce);
+      return { ok: true };
+    },
+    use({ nonce } = {}) {
+      if (nonEmpty(nonce)) used.add(nonce);
+    },
+    checkAndUse(payload) {
+      const result = this.check(payload);
+      if (!result.ok) return result;
+      this.use(payload);
       return { ok: true };
     },
   };
@@ -80,15 +88,19 @@ export function createX402Boundary({ verify, settle, replay = createReplayGuard(
           !requirement.accepts.some((accept) => accept?.network === NETWORK && accept?.scheme === 'exact')) {
         return { status: 'invalid', reason: 'network_mismatch' };
       }
-      const replayResult = replay.checkAndUse(parsed.value.payload);
+      const replayResult = replay.check(parsed.value.payload);
       if (!replayResult.ok) return { status: 'invalid', reason: replayResult.reason };
       if (typeof verify !== 'function') return { status: 'unavailable', reason: 'facilitator_unavailable' };
       try {
         const result = await verify(parsed.value, requirement);
         if (result?.unavailable || result?.status === 'unavailable') return { status: 'unavailable', reason: result.reason || 'facilitator_unavailable' };
         if (result?.status === 'invalid') return { status: 'invalid', reason: result.reason || 'payment_invalid' };
-        if (result?.status === 'verified') return result;
+        if (result?.status === 'verified') { replay.use(parsed.value.payload); return result; }
         if (!result?.valid) return { status: 'invalid', reason: result?.reason || 'payment_invalid' };
+        // Only mark the nonce consumed once verification has actually succeeded --
+        // an unverified/malformed submission under a legitimate nonce must never
+        // be able to burn that nonce and deny the real payer's later attempt.
+        replay.use(parsed.value.payload);
         const { valid: _valid, ...details } = result;
         return { status: 'verified', ...details };
       } catch {

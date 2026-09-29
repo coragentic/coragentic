@@ -39,3 +39,24 @@ test('quote and preview fail honestly without a usable client/account', async ()
   await assert.rejects(() => quoteSwap({ token: WETH, amount: '1' }, { client: {} }), /public client/i);
   await assert.rejects(() => previewSwap({ token: WETH, amount: '1' }), /wallet address is required/i);
 });
+
+test('quote rejects slippage bounds that would produce a zero-protection minimumOut', async () => {
+  const stubClient = {
+    readContract: async ({ functionName }) => {
+      if (functionName === 'decimals') return 18;
+      if (functionName === 'quoteExactInput') return [1_000_000n, [], [], 0n];
+      throw new Error('unexpected call');
+    },
+  };
+  // A full 10000bps (100%) slippage tolerance authorizes amountOutMinimum = 0,
+  // i.e. "accept any output including zero" -- unsafe unsigned calldata for a
+  // non-custodial product to hand a wallet. This must be rejected before it
+  // ever reaches previewSwap's calldata construction.
+  await assert.rejects(
+    () => quoteSwap({ token: WETH, amount: '1', slippageBps: 10_000 }, { client: stubClient }),
+    /invalid slippage bps/,
+  );
+  // A reasonable bound (5%) must still work and produce a non-zero floor.
+  const quote = await quoteSwap({ token: WETH, amount: '1', slippageBps: 500 }, { client: stubClient });
+  assert.equal(quote.minimumOut, '950000');
+});

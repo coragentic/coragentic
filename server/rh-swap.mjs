@@ -66,7 +66,11 @@ export async function quoteSwap(input, { client = createRobinhoodPublicClient(),
   }
   if (!best) throw new Error('no viable Robinhood Chain swap route');
   const slippageBps = input.slippageBps === undefined ? 50 : Number(input.slippageBps);
-  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 10_000) throw new Error('invalid slippage bps');
+  // Cap at 2000bps (20%): a wide but still meaningful bound. 10000bps (100%)
+  // would authorize amountOutMinimum = 0 -- unsigned calldata accepting any
+  // output, including zero, which is unsafe for a non-custodial product to
+  // hand a wallet to sign.
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps > 2_000) throw new Error('invalid slippage bps');
   const minimumOut = best.amountOut * BigInt(10_000 - slippageBps) / 10_000n;
   return { chainId: CHAIN_ID, tokenIn: WETH, tokenOut: token, amountIn: amountIn.toString(), amountOut: best.amountOut.toString(), amountOutFormatted: formatUnits(best.amountOut, decimals), minimumOut: minimumOut.toString(), slippageBps, route: best.route, path: best.path, gasEstimate: best.gasEstimate.toString(), decimals: Number(decimals) };
 }

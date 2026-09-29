@@ -149,8 +149,8 @@ export function createMemoryAdapter(db, defaults = {}) {
   migrateRagSchema(db);
   return Object.freeze({
     retain: (input) => retainMemory(db, input, defaults),
-    recall: (query, options = {}) => recall(db, query, { ...options, agentId: options.agentId ?? defaults.agentId }),
-    contextPack: (query, budget, options = {}) => contextPack(db, query, budget, { ...options, agentId: options.agentId ?? defaults.agentId }),
+    recall: (query, options = {}) => recall(db, query, { ...options, agentId: options.agentId ?? defaults.agentId, ownerWallet: options.ownerWallet ?? defaults.ownerWallet }),
+    contextPack: (query, budget, options = {}) => contextPack(db, query, budget, { ...options, agentId: options.agentId ?? defaults.agentId, ownerWallet: options.ownerWallet ?? defaults.ownerWallet }),
     forget: (id) => forgetMemory(db, id, { agentId: defaults.agentId }),
   });
 }

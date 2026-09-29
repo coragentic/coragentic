@@ -30,6 +30,7 @@ function seed(path) {
   db.prepare(`INSERT INTO offerings (id, agent_id, owner_wallet, name, description, price_atomic, asset, network, requirements_json, deliverables_json, status, created_at, updated_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run('offering-a', 'agent-a', seller, 'Test offering', 'A test offering', '1000000', USDG_ADDRESS, 'eip155:4663', '{}', '{}', 'active', stamp, stamp);
+  db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('job-a', 'offering-a', payer, seller, '{}', 'requested', '{"status":"unpaid"}', null, stamp, stamp);
   db.close();
 }
 
@@ -92,7 +93,7 @@ test('settle verifies a real successful transfer receipt and records it, then re
   const { child, base } = await start(path, rpcUrl);
   try {
     const first = await fetch(`${base}/v1/offerings/offering-a/settle`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash, jobId: 'job-a' }),
     });
     const firstBody = await first.json();
     assert.equal(first.status, 200);
@@ -103,7 +104,7 @@ test('settle verifies a real successful transfer receipt and records it, then re
 
     // Replay: the exact same tx hash must be rejected the second time.
     const second = await fetch(`${base}/v1/offerings/offering-a/settle`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash, jobId: 'job-a' }),
     });
     const secondBody = await second.json();
     assert.equal(second.status, 409);
@@ -123,11 +124,75 @@ test('settle rejects an underpaying transaction and never records it', async () 
   const { child, base } = await start(path, rpcUrl);
   try {
     const res = await fetch(`${base}/v1/offerings/offering-a/settle`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash }),
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash, jobId: 'job-a' }),
     });
     const body = await res.json();
     assert.equal(res.status, 402);
     assert.equal(body.ok, false);
     assert.equal(body.data.reason, 'no_matching_transfer_log');
+  } finally { await stop(child); rpcServer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a settled transfer is bound to one specific job and cannot be claimed for a second job at the same offering/price', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coragentic-settle-jobbind-'));
+  const path = join(dir, 'db.sqlite');
+  const db = openDatabase(path);
+  db.prepare('INSERT INTO agents VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run('agent-a', seller, 'agent-a', 'test agent', null, '[]', '[]', '[]', 0, 'draft', stamp, stamp);
+  db.prepare(`INSERT INTO offerings (id, agent_id, owner_wallet, name, description, price_atomic, asset, network, requirements_json, deliverables_json, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run('offering-a', 'agent-a', seller, 'Test offering', 'A test offering', '1000000', USDG_ADDRESS, 'eip155:4663', '{}', '{}', 'active', stamp, stamp);
+  // Two separate jobs against the SAME offering (same price/asset/seller) --
+  // this is exactly the shape that lets one observed transfer be replayed
+  // across unrelated jobs if settlement isn't bound to a specific job.
+  db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('job-1', 'offering-a', payer, seller, '{}', 'requested', '{"status":"unpaid"}', null, stamp, stamp);
+  db.prepare('INSERT INTO jobs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run('job-2', 'offering-a', payer, seller, '{}', 'requested', '{"status":"unpaid"}', null, stamp, stamp);
+  db.close();
+
+  const txHash = `0x${'cc'.repeat(32)}`;
+  const receipt = { status: '0x1', logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(1_000_000n).toString(16)}` }] };
+  const { server: rpcServer, url: rpcUrl } = await startMockRpc(() => receipt);
+  const { child, base } = await start(path, rpcUrl);
+  try {
+    // Settle for job-1 -- must succeed and mark job-1 paid.
+    const first = await fetch(`${base}/v1/offerings/offering-a/settle`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash, jobId: 'job-1' }),
+    });
+    const firstBody = await first.json();
+    assert.equal(first.status, 200);
+    assert.equal(firstBody.data.jobId, 'job-1');
+
+    // Attempting to attribute the SAME transfer to job-2 must be rejected --
+    // this is the cross-job/order-attribution vulnerability.
+    const second = await fetch(`${base}/v1/offerings/offering-a/settle`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash, jobId: 'job-2' }),
+    });
+    const secondBody = await second.json();
+    assert.equal(second.status, 409);
+    assert.equal(secondBody.error, 'transaction_already_settled');
+
+    const jobsDb = openDatabase(path);
+    const job1 = jobsDb.prepare('SELECT payment_json FROM jobs WHERE id = ?').get('job-1');
+    const job2 = jobsDb.prepare('SELECT payment_json FROM jobs WHERE id = ?').get('job-2');
+    jobsDb.close();
+    assert.equal(JSON.parse(job1.payment_json).status, 'settled');
+    assert.equal(JSON.parse(job2.payment_json).status, 'unpaid');
+  } finally { await stop(child); rpcServer.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('settle without a jobId is rejected -- payment must be bound to a specific job', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'coragentic-settle-nojobid-'));
+  const path = join(dir, 'db.sqlite'); seed(path);
+  const txHash = `0x${'dd'.repeat(32)}`;
+  const receipt = { status: '0x1', logs: [{ address: USDG_ADDRESS, topics: [TRANSFER_TOPIC, pad32(payer), pad32(seller)], data: `0x${(1_000_000n).toString(16)}` }] };
+  const { server: rpcServer, url: rpcUrl } = await startMockRpc(() => receipt);
+  const { child, base } = await start(path, rpcUrl);
+  try {
+    const res = await fetch(`${base}/v1/offerings/offering-a/settle`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ txHash }),
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.error, 'job_id_required');
   } finally { await stop(child); rpcServer.close(); rmSync(dir, { recursive: true, force: true }); }
 });

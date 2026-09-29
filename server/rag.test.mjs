@@ -101,3 +101,17 @@ test('adapter retain, recall, and forget update the index and provenance', () =>
     assert.equal(forgetMemory(f.db, id), false);
   } finally { close(f); }
 });
+
+test('adapter recall never leaks another owner\'s memory under a shared agentId', () => {
+  const f = fixture();
+  try {
+    const adapterA = createMemoryAdapter(f.db, { agentId: 'shared-agent', ownerWallet: 'owner-a', now: () => '2026-02-01T00:00:00.000Z' });
+    const adapterB = createMemoryAdapter(f.db, { agentId: 'shared-agent', ownerWallet: 'owner-b', now: () => '2026-02-01T00:00:00.000Z' });
+    adapterA.retain({ key: 'mine', content: 'owner-a secret shared-topic' });
+    adapterB.retain({ key: 'other', content: 'owner-b secret shared-topic' });
+    const seenByA = adapterA.recall('shared-topic').map((row) => row.key);
+    assert.deepEqual(seenByA, ['mine']);
+    const seenByB = adapterB.recall('shared-topic').map((row) => row.key);
+    assert.deepEqual(seenByB, ['other']);
+  } finally { close(f); }
+});
