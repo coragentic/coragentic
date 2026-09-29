@@ -87,6 +87,16 @@ export function openDatabase(path = process.env.CORAGENTIC_DB || 'data/coragenti
       UNIQUE(agent_id, memory_key)
     );
     CREATE INDEX IF NOT EXISTS idx_agent_memory_agent ON agent_memory(agent_id, updated_at);
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      owner_wallet TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      request TEXT NOT NULL,
+      result_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_agent ON agent_runs(agent_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS x402_settlements (
       tx_hash TEXT PRIMARY KEY,
       offering_id TEXT NOT NULL REFERENCES offerings(id),

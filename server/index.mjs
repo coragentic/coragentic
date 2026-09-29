@@ -8,12 +8,13 @@ import { createPaymentRequired, createX402Boundary, parsePaymentSignature, NETWO
 import { createUsdgFacilitator } from './x402-facilitator.mjs';
 import { createDirectTransferFacilitator, USDG_ADDRESS as USDG_SETTLEMENT_ADDRESS } from './x402-onchain-verifier.mjs';
 import { createRateLimiter, getCorsHeaders, getSecurityHeaders, formatPublicError } from './security.mjs';
-import { migrateRagSchema, indexMemory, recall as ragRecall } from './rag.mjs';
+import { migrateRagSchema, indexMemory, recall as ragRecall, contextPack } from './rag.mjs';
 import { buildAgentCard, buildMcpManifest } from './interoperability.mjs';
 import { migrateSwarmSchema, SwarmState, createBoundedContextInput, runSwarm } from './swarm.mjs';
 import { createOpenRouterJevAdapterFromEnv } from './jev-openrouter.mjs';
 import { runContextWorker } from './swarm-context-worker.mjs';
 import { AGENT_TEMPLATE_IDS, starterVaultForTemplate, templateCapabilities } from './agent-templates.mjs';
+import { runAgentBrain } from './agent-brain.mjs';
 import { quoteSwap, previewSwap, swapStatus } from './rh-swap.mjs';
 import { getWorkerReadiness } from './worker-readiness.mjs';
 
@@ -611,6 +612,33 @@ async function handle(req, res) {
     indexMemory(db, row);
     audit(wallet, 'agent_memory', row.id, 'memory_retained', { agentId: parts[2], key });
     return json(res, 200, { ok: true, data: { id: row.id, key: row.memory_key, content: row.content, tags: JSON.parse(row.tags_json), createdAt: row.created_at, updatedAt: row.updated_at } });
+  }
+  if (req.method === 'GET' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'runs') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const rows = db.prepare('SELECT * FROM agent_runs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 50').all(parts[2]);
+    return json(res, 200, { ok: true, data: rows.map((row) => ({ id: row.id, kind: row.kind, request: row.request, result: JSON.parse(row.result_json), createdAt: row.created_at })) });
+  }
+  if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'think') {
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agent = db.prepare('SELECT * FROM agents WHERE id = ?').get(parts[2]);
+    if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
+    if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    const body = await readBody(req);
+    const request = cleanText(body.request, 4_000);
+    if (!request) return json(res, 400, { ok: false, error: 'agent_request_required' });
+    const pack = contextPack(db, request, 4_000, { agentId: parts[2], ownerWallet: wallet });
+    const mission = db.prepare('SELECT content FROM agent_memory WHERE agent_id = ? AND memory_key = ?').get(parts[2], 'mission')?.content ?? agent.description;
+    const result = await runAgentBrain({ mission, request, context: pack.text });
+    const timestamp = new Date().toISOString();
+    const runId = randomUUID();
+    db.prepare('INSERT INTO agent_runs (id, agent_id, owner_wallet, kind, request, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(runId, parts[2], wallet, 'brain', request, JSON.stringify({ ...result, evidenceCount: pack.evidence.length }), timestamp);
+    audit(wallet, 'agent_run', runId, 'agent_thought', { agentId: parts[2], evidenceCount: pack.evidence.length });
+    return json(res, 201, { ok: true, data: { id: runId, kind: 'brain', request, result: { ...result, evidenceCount: pack.evidence.length }, createdAt: timestamp } });
   }
   if (req.method === 'DELETE' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'memory' && parts[4]) {
     const wallet = sessionWallet(req);
