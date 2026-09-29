@@ -1,6 +1,6 @@
 {
   "name": "@coragentic/mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MCP stdio and Streamable HTTP server for the Coragentic API",
   "type": "module",
   "license": "MIT",

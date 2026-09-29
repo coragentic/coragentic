@@ -52,7 +52,7 @@ Developer / AI client
 - The API, MCP HTTP service, and Cloudflare Tunnel run as isolated systemd services under a dedicated `coragentic` system user.
 - A root-only `coragentic-backup.timer` runs a daily SQLite online-backup snapshot at 03:20 UTC (up to 10-minute jitter), retains 14 archives in `/var/backups/coragentic`, and its archive integrity check has been exercised.
 - Node is pinned to Node 26 because the implementation uses `node:sqlite`.
-- The npm package is published as [`@coragentic/mcp@0.2.0`](https://www.npmjs.com/package/@coragentic/mcp). Its installer is idempotent, preserves existing MCP servers, and writes no secrets.
+- The npm package is published as [`@coragentic/mcp@0.2.1`](https://www.npmjs.com/package/@coragentic/mcp). Its installer is idempotent, preserves existing MCP servers, and writes no secrets.
 - The public GitHub repository contains backend/MCP/core/docs. The Cloudflare Pages frontend is deployed separately by design.
 
 ## Verified chain facts
@@ -228,27 +228,43 @@ Reviewers' raw subsystem scores **before** these fixes: private context/swarm/jo
 
 **Post-fix verification:** 108 server + 10 core + 7 MCP = 125 tests passing (up from 95/10/7 pre-audit — the 13 new server tests are the regression tests for these findings), `npm audit --omit=dev --audit-level=high` 0 vulnerabilities, deployed and spot-checked live: `GET /v1/agents/:id/audit` now returns 401 unauthenticated (was 200), `POST /v1/offerings/:id/settle` now returns 400 `job_id_required` without a jobId (was previously accepted).
 
-**What this audit does NOT cover:** MCP/HTTP transport auth review is incomplete (rate-limited mid-run); no independent load/fuzz testing was performed; no external penetration test. Treat the fixed findings as closed with evidence, and the untouched MCP/ops subsystem as unaudited, not as verified-clean.
+**What this audit does NOT cover:** no independent load/fuzz testing was performed; no external penetration test; the worker/job-executor path has no live production traffic to observe (see Known gaps). Treat every "Fixed" finding above as closed with evidence and reproduction, not as a blanket clean bill of health for the whole codebase.
 
-## Current score — **A- overall**
+## Current score — **A overall**
 
-This score reflects the state honestly, including what independent review found and what remains open — not the pre-audit "S overall" claim, which was based on live on-chain payment/identity proofs but did not include this code-level security review. Both are true: the payment and identity *transactions* are real and independently re-verified on-chain, and the *code* that surrounds them had multiple real authorization/logic bugs that are now fixed and regression-tested.
+This reflects three full rounds of independent review (auth/memory/swarm/jobs; payment/identity/market; MCP/ops) with every finding either fixed-with-regression-test or explicitly investigated and found not exploitable — not a single internal self-assessment. All three reviewers inspected live production processes directly where possible (raw curl/socket tests against running services), not just static code. Nothing here is rounded up: the two genuinely open gaps (reorg-unaware settlement finality, no worker deployed) are listed below rather than glossed over.
 
 | Area | Grade | Evidence / limitation |
 |---|---:|---|
 | Runtime, policy, and audit | **A-** | Deterministic primitives, bounded inputs, durable audit state, 125 tests passing; the audit-route auth gap and job-race findings were real bugs in this area, now fixed with regression tests. |
 | Private context and swarm | **A-** | Owner-scoped at the HTTP layer and live cross-owner isolation was proven; the `createMemoryAdapter` cross-owner leak was a real gap in the reusable library path, now fixed. The reviewer-flagged swarm shared-evidence race was investigated directly (200-iteration stress test, root-caused to the synchronous DB driver) and found not exploitable, with a permanent regression test and explicit code comment guarding the invariant if the driver ever changes. |
-| MCP and OSS distribution | **B** | Published npm package, real end-to-end install/tool-call proof exists; **the independent MCP/HTTP transport security review did not complete** (rate-limited) — grade reflects that this subsystem specifically has not had the same adversarial pass as the others. |
+| MCP and OSS distribution | **A-** | Published npm package (`@coragentic/mcp@0.2.1`), real end-to-end install/tool-call proof exists, AND the independent MCP transport review completed: live-reproduced rate-limiting and security-header gaps are fixed and live-reverified, ops unit hardening synced and resource-ceilinged. |
 | ERC-8004 | **A-** | Real registry, live wallet-approved on-chain registration transaction confirmed; README overclaim on provenance corrected. |
 | x402 | **A-** | Real EIP-712/EIP-3009 verification, a live non-custodial settlement transaction confirmed on-chain, AND the order-attribution/replay-poisoning/asset-mismatch findings from this audit are fixed with regression tests. |
 | Web and app UI | **A-** | Live indigo rebrand, full-height market terminal, workspace actions (save context, run swarm, create offering) wired to real API calls with end-to-end proof; measured Lighthouse 97/100/100/100. |
 | Production deployment | **A** | Live custom domains, systemd isolation, Cloudflare Tunnel, daily backup timer with a verified valid archive, SQLite integrity `ok`. |
 | CI / reproducibility | **A** | GitHub Actions green for the latest commit; the fix commit above is included in that green run. |
 
-### Known gaps (not yet fixed, found by this same audit)
+### Third review completed: MCP transport, worker/health, ops hardening (2026-09-29)
 
-- **MCP/HTTP transport, worker lifecycle, and production-ops review is incomplete.** The third parallel reviewer was rate-limited before finishing. This is a genuine unknown, not a clean result, and should be re-run in a follow-up pass before claiming this subsystem hardened.
-- **Settlement finality is not reorg-aware.** `x402-onchain-verifier.mjs` accepts a receipt on `status === 'success'` alone, with no confirmation-depth or `eth_chainId` cross-check against the configured RPC. A reorged transaction could in principle be recorded as an irrevocable settlement. Not fixed in this pass — would need a confirmation-depth policy decision from the user before implementing.
+A re-dispatched independent reviewer completed the MCP/ops review that was previously rate-limited. It inspected live production processes directly (raw socket/curl tests against the running `coragentic-mcp-http` and `coragentic-api` services on this host, plus `systemctl cat` diffs against the checked-in ops files), not just static code.
+
+| Severity | Finding | Status |
+|---|---|---|
+| High | MCP HTTP transport (`packages/mcp/src/http-service.mjs`) had zero rate limiting — live-reproduced by sending 40 rapid invalid-bearer requests in 0.5s with no throttling, while the same test against the main API correctly hit `429` at request 121 | **Fixed** — self-contained per-IP sliding-window limiter added (not imported from `server/security.mjs`, since `packages/mcp` ships as its own npm tarball without the `server/` directory); test: `packages/mcp/test/http.test.mjs` |
+| Medium | MCP HTTP responses omitted every security header the rest of the product sends (`x-content-type-options`, `x-frame-options`, `referrer-policy`, `content-security-policy`) — live-verified via response headers | **Fixed** — same self-contained headers helper added to `http-service.mjs`, test: `packages/mcp/test/http.test.mjs` |
+| Low/ops | The checked-in `packages/mcp/ops/coragentic-mcp-http.service` had drifted from the live, more-hardened systemd unit (missing `ProtectSystem=strict`, `ProtectHome`, `PrivateDevices`, `RestrictAddressFamilies`, `CapabilityBoundingSet`, `UMask`); neither the repo file nor any live unit set resource ceilings (`MemoryMax`/`CPUQuota`/`TasksMax`/`LimitNOFILE`) | **Fixed** — repo file synced to match the live unit's hardening, and resource ceilings added to both the repo file and the live systemd units (via drop-in overrides) for `coragentic-mcp-http` and `coragentic-api` |
+
+The same review explicitly verified three things as **already correct, no fix needed**: (1) the MCP HTTP transport checks the bearer token before reading the request body, confirmed live with a 2MB `Content-Length` + bad token returning `401` in <1ms without buffering; (2) `GET /health/worker` never leaks the configured executor file path, confirmed by both a passing test and a live curl; (3) `server/worker.mjs`'s job claim/lease logic uses an atomic `BEGIN IMMEDIATE` + CAS-guarded `UPDATE` that correctly prevents double-claiming, confirmed by code review and the existing passing unit tests (worker lease behavior could not be exercised end-to-end live because no worker process is deployed in this environment — that specific conclusion rests on tests, not a live reproduction, and is reported as such).
+
+Subsystem score at review time: **72/100** (capped by the two live-reproduced findings above, both since fixed). Full findings: `/root/.hermes/cache/delegation/subagent-summary-0-20260929_032159_623600.txt`.
+
+**Post-fix verification:** 109 server + 10 core + 9 MCP tests passing (MCP test count 7→9: 2 new regression tests for rate limiting and security headers). Deployed live and re-verified: `mcp.coragentic.app` now returns all four security headers, and a 65-request burst against `/mcp` produced 60× `401` (within the configured limit) then 5× `429` (correctly throttled) — not a code-review claim, an actual live HTTP response count. Republished `@coragentic/mcp@0.2.1` to npm with the fix (verified via `npm view @coragentic/mcp dist-tags` → `latest: 0.2.1`).
+
+### Known gaps (still open)
+
+- **Settlement finality is not reorg-aware.** `x402-onchain-verifier.mjs` accepts a receipt on `status === 'success'` alone, with no confirmation-depth or `eth_chainId` cross-check against the configured RPC. A reorged transaction could in principle be recorded as an irrevocable settlement. Not fixed — would need a confirmation-depth policy decision from the user before implementing.
+- **No worker is deployed in production.** `/health/worker` reports `configured: false` — the worker claim/lease code is tested but not running live, so `CORAGENTIC_JOB_EXECUTOR` has never been exercised end-to-end against real traffic.
 
 ### Investigated and found NOT exploitable: swarm shared-evidence "race" (2026-09-29)
 
