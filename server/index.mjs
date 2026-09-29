@@ -331,6 +331,54 @@ async function handle(req, res) {
     if (!agent || agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'swarm_owner_required' });
     return json(res, 200, { ok: true, data: { ...run, steps: state.listSteps(parts[2]), decisionProvider: run.sharedEvidence.decisionProvider } });
   }
+  if (req.method === 'GET' && url.pathname === '/v1/graph') {
+    // The owner's personal knowledge graph: their agents, retained context
+    // records, brain/swarm runs, automations and skills as nodes; edges bind
+    // each record to its agent. Strictly session-scoped -- one owner never
+    // sees another owner's nodes (obsidian-style private graph).
+    const wallet = sessionWallet(req);
+    if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    const agentRows = db.prepare('SELECT id, name, description, capabilities_json, status, created_at FROM agents WHERE owner_wallet = ? ORDER BY created_at').all(wallet);
+    const nodes = [];
+    const links = [];
+    let memories = 0;
+    let runs = 0;
+    for (const agent of agentRows) {
+      nodes.push({ id: agent.id, kind: 'agent', label: agent.name, sub: agent.description || 'agent', meta: { capabilities: JSON.parse(agent.capabilities_json || '[]'), status: agent.status } });
+      for (const mem of db.prepare('SELECT id, memory_key, content, updated_at FROM agent_memory WHERE agent_id = ? AND owner_wallet = ? ORDER BY updated_at').all(agent.id, wallet)) {
+        memories += 1;
+        nodes.push({ id: mem.id, kind: 'memory', label: mem.memory_key, sub: String(mem.content ?? '').slice(0, 120), meta: { updatedAt: mem.updated_at, agentId: agent.id } });
+        links.push({ source: agent.id, target: mem.id, kind: 'context' });
+      }
+      for (const run of db.prepare('SELECT id, kind, request, created_at FROM agent_runs WHERE agent_id = ? AND owner_wallet = ? ORDER BY created_at').all(agent.id, wallet)) {
+        runs += 1;
+        nodes.push({ id: run.id, kind: 'run', label: run.kind === 'automation' ? 'automation run' : 'brain run', sub: String(run.request ?? '').slice(0, 120), meta: { createdAt: run.created_at, agentId: agent.id } });
+        links.push({ source: agent.id, target: run.id, kind: 'produced' });
+      }
+      for (const auto of db.prepare('SELECT id, task, next_run_at FROM agent_automations WHERE agent_id = ? AND owner_wallet = ?').all(agent.id, wallet)) {
+        nodes.push({ id: auto.id, kind: 'automation', label: String(auto.task ?? '').slice(0, 60), sub: `next ${auto.next_run_at}`, meta: { agentId: agent.id } });
+        links.push({ source: agent.id, target: auto.id, kind: 'schedules' });
+      }
+      for (const skill of db.prepare('SELECT skill_id FROM agent_skills WHERE agent_id = ? AND owner_wallet = ?').all(agent.id, wallet)) {
+        const skillNodeId = `skill:${agent.id}:${skill.skill_id}`;
+        nodes.push({ id: skillNodeId, kind: 'skill', label: skill.skill_id, sub: 'installed skill', meta: { agentId: agent.id } });
+        links.push({ source: agent.id, target: skillNodeId, kind: 'capability' });
+      }
+    }
+    // memory-to-memory edges when they share an agent: the obsidian-style
+    // context web (same-agent records are related knowledge).
+    const memoryIds = new Set(nodes.filter((n) => n.kind === 'memory').map((n) => n.id));
+    for (const link of [...links]) {
+      if (link.kind !== 'context') continue;
+      const siblings = nodes.filter((n) => n.kind === 'memory' && n.id !== link.target && memoryIds.has(n.id));
+      for (const sibling of siblings) {
+        if (!links.some((l) => (l.source === link.target && l.target === sibling.id) || (l.source === sibling.id && l.target === link.target))) {
+          links.push({ source: link.target, target: sibling.id, kind: 'relates' });
+        }
+      }
+    }
+    return json(res, 200, { ok: true, data: { nodes, links, summary: { agents: agentRows.length, memories, runs, nodes: nodes.length, links: links.length } } });
+  }
   if (req.method === 'POST' && url.pathname === '/v1/auth/challenge') {
     const body = await readBody(req);
     const wallet = normalizeWallet(body.wallet);
