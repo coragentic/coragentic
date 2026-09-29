@@ -695,7 +695,7 @@ async function handle(req, res) {
     if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
     if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
     const body = await readBody(req); const skillId = cleanText(body.skillId, 80);
-    const catalog = new Set(['research-brief', 'swarm-analysis', 'report-writer', 'uniswap']);
+    const catalog = new Set(['research-brief', 'swarm-analysis', 'report-writer', 'uniswap', 'web3']);
     if (!catalog.has(skillId)) return json(res, 400, { ok: false, error: 'invalid_agent_skill' });
     const timestamp = new Date().toISOString();
     db.prepare('INSERT INTO agent_skills (agent_id, owner_wallet, skill_id, enabled, config_json, installed_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(agent_id, skill_id) DO UPDATE SET enabled=excluded.enabled, config_json=excluded.config_json, installed_at=excluded.installed_at').run(parts[2], wallet, skillId, 1, '{}', timestamp);
