@@ -50,7 +50,7 @@ export function parseAgentBrainOutput(raw) {
   };
 }
 
-export async function runAgentBrain({ mission, request, context }, { apiKey = process.env.VIKEY_API_KEY, apiUrl = DEFAULT_API_URL, model = DEFAULT_MODEL, maxTokens = DEFAULT_MAX_TOKENS, timeoutMs = 15_000, fetch: fetchImpl = globalThis.fetch } = {}) {
+export async function runAgentBrain({ mission, request, context }, { apiKey = process.env.VIKEY_API_KEY, apiUrl = DEFAULT_API_URL, model = DEFAULT_MODEL, maxTokens = DEFAULT_MAX_TOKENS, timeoutMs = Number(process.env.AGENT_BRAIN_TIMEOUT_MS || 45_000), fetch: fetchImpl = globalThis.fetch } = {}) {
   if (!apiKey) throw new Error('agent_brain_not_configured');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -67,7 +67,36 @@ export async function runAgentBrain({ mission, request, context }, { apiKey = pr
   } finally {
     clearTimeout(timer);
   }
-  if (!response.ok) throw new Error(`agent_brain_model_error_${response.status}`);
+  if (!response.ok) {
+    // Read the provider's error body for diagnostics only — the thrown label
+    // stays generic so no upstream text leaks into API responses or logs.
+    let detail = '';
+    try {
+      const errBody = await response.json();
+      const code = errBody?.error?.code ?? '';
+      // Reasoning models can burn the whole token budget on hidden reasoning.
+      // Retry once with a doubled budget before giving up.
+      if (code === 'reasoning_exhausted_budget') {
+        const retryController = new AbortController();
+        const retryTimer = setTimeout(() => retryController.abort(), timeoutMs);
+        try {
+          const retry = await fetchImpl(apiUrl, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ model, max_tokens: maxTokens * 2, messages: [{ role: 'user', content: buildAgentBrainPrompt({ mission, request, context: sanitizeModelContext(context) }) }] }),
+            signal: retryController.signal,
+          });
+          if (retry.ok) {
+            const retryBody = await retry.json();
+            const retryContent = retryBody?.choices?.[0]?.message?.content;
+            if (retryContent) return parseAgentBrainOutput(retryContent);
+          }
+        } finally { clearTimeout(retryTimer); }
+      }
+      detail = typeof code === 'string' && code ? `_${code.slice(0, 40)}` : '';
+    } catch { /* keep generic label */ }
+    throw new Error(`agent_brain_model_error_${response.status}${detail}`);
+  }
   const body = await response.json();
   const content = body?.choices?.[0]?.message?.content;
   if (!content) throw new Error('agent_brain_empty_model_response');
