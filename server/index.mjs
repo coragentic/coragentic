@@ -730,7 +730,19 @@ async function handle(req, res) {
     if (!request) return json(res, 400, { ok: false, error: 'agent_request_required' });
     const pack = contextPack(db, request, 4_000, { agentId: parts[2], ownerWallet: wallet });
     const mission = db.prepare('SELECT content FROM agent_memory WHERE agent_id = ? AND owner_wallet = ? AND memory_key = ?').get(parts[2], wallet, 'mission')?.content ?? agent.description;
-    const result = await runAgentBrain({ mission, request, context: pack.text });
+    // Context chain: carry forward the previous run's answer summary + hash so
+    // a NEW chat is still aware of prior interactions (obsidian-style backlink).
+    const previousRun = db.prepare('SELECT id, request, result_json, created_at FROM agent_runs WHERE agent_id = ? AND owner_wallet = ? ORDER BY created_at DESC LIMIT 1').get(parts[2], wallet);
+    let contextChain = null;
+    if (previousRun) {
+      const short = createHash('sha256').update(`${previousRun.id}:${previousRun.request}`).digest('hex').slice(0, 12);
+      let previousSummary = '';
+      try { previousSummary = String(JSON.parse(previousRun.result_json)?.answer ?? '').slice(0, 240); } catch { /* keep empty */ }
+      contextChain = { previousRunId: previousRun.id, reference: short, request: String(previousRun.request).slice(0, 160), summary: previousSummary, at: previousRun.created_at };
+    }
+    const chainedContext = contextChain ? `${pack.text}\n\n[context chain · ${contextChain.reference} · prior turn: "${contextChain.request}" → ${contextChain.summary}]` : pack.text;
+    const result = await runAgentBrain({ mission, request, context: chainedContext });
+    result.contextChain = contextChain;
     // Model-generated citations are advisory until checked against the exact
     // evidence pack used for this run. Never persist or display fabricated
     // IDs as proof of grounding.
