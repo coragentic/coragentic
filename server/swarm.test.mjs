@@ -76,6 +76,23 @@ test('noul escalates to human_escalation', async () => {
   assert.equal(gate.status, 'human_escalation');
 });
 
+// noulGate() called adapter.noul(mergedObject) -- a SINGLE argument -- but a
+// real decision-adapter's noul(input, options) expects TWO separate
+// arguments and reads the threshold off `options`, not off `input`. With
+// only one argument, `options` defaulted to {} internally and every
+// threshold comparison compared the live probability against undefined,
+// which is always false -- so noul() ALWAYS reported not-allowed regardless
+// of confidence, and every real run was rejected no matter how good the
+// worker's answer was (reproduced live: confidence 0.95, score 0.93, still
+// rejected). This asserts threshold actually reaches the adapter's options.
+test('noulGate forwards the threshold to the adapter as options, not just inside the merged input', async () => {
+  const seenOptions = [];
+  const adapter = { noul: async (input, options) => { seenOptions.push(options); return { allowed: true, confidence: 1 }; } };
+  await noulGate(adapter, { score: 1, threshold: 0.42, criteria: { true: 'allow', false: 'deny' } });
+  assert.equal(seenOptions.length, 1);
+  assert.equal(seenOptions[0]?.threshold, 0.42, 'the adapter must receive threshold via options, not buried in input');
+});
+
 test('resume is idempotent by step and does not rerun completed work', async () => {
   const database = db();
   const state = new SwarmState(database);
@@ -86,6 +103,37 @@ test('resume is idempotent by step and does not rerun completed work', async () 
   const second = await runSwarm(state, runId, [{ key: 'a' }, { key: 'b' }], async () => { calls++; return {}; });
   assert.equal(second.status, 'completed');
   assert.equal(calls, 2);
+});
+
+// The jev judge previously only saw the step's INPUT (goal, worker id,
+// context metadata) -- never the worker's actual result/answer. A judge
+// that never sees what it's supposed to be scoring can only guess, so real
+// runs came back rejected almost regardless of answer quality (reproduced
+// live: a worker that answered correctly with confidence 0.95 still scored
+// 0.16 and was rejected). The judge's state must include the produced result.
+test('the score/noul decision state includes the worker result, not just its input', async () => {
+  const database = db();
+  const state = new SwarmState(database);
+  const runId = state.createRun({ goal: 'answer well' });
+  const seenStates = [];
+  const seenInstructions = [];
+  const adapter = {
+    score: async (input) => { seenStates.push(input.state); seenInstructions.push(input.instructions); return 1; },
+    noul: async (input) => { seenStates.push(input.state); seenInstructions.push(input.instructions); return { allowed: true }; },
+  };
+  await runSwarm(state, runId, [{ key: 'a' }], async () => ({ answer: 'the real answer', confidence: 0.95 }), { adapter, threshold: 0.5 });
+  assert.ok(seenStates.length >= 2, 'both score and noul should have been called');
+  for (const seenState of seenStates) {
+    assert.ok(seenState.result, 'decision state must include the worker result');
+    assert.equal(seenState.result.answer, 'the real answer');
+  }
+  // A judge given no goal-specific instructions can only guess at what
+  // "approve" means (reproduced live: a correct answer at confidence 0.95
+  // scored 0.72 -- middling -- and was still rejected, because the judge was
+  // never told what goal it was scoring against).
+  for (const instructions of seenInstructions) {
+    assert.match(instructions, /answer well/, 'instructions should reference the run goal');
+  }
 });
 
 test('concurrent workers writing shared evidence do not lose each other\'s results (lost-update race)', async () => {

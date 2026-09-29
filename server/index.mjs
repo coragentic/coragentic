@@ -12,6 +12,7 @@ import { migrateRagSchema, indexMemory, recall as ragRecall } from './rag.mjs';
 import { buildAgentCard, buildMcpManifest } from './interoperability.mjs';
 import { migrateSwarmSchema, SwarmState, createBoundedContextInput, runSwarm } from './swarm.mjs';
 import { createOpenRouterJevAdapterFromEnv } from './jev-openrouter.mjs';
+import { runContextWorker } from './swarm-context-worker.mjs';
 import { quoteSwap, previewSwap, swapStatus } from './rh-swap.mjs';
 import { getWorkerReadiness } from './worker-readiness.mjs';
 
@@ -224,8 +225,12 @@ async function handle(req, res) {
   if (req.method === 'GET' && url.pathname === '/v1/swarm/status') {
     const wallet = sessionWallet(req);
     if (!wallet) return json(res, 401, { ok: false, error: 'wallet_session_required' });
+    // DISTINCT matters: a real run accumulates multiple audit events for the
+    // same actor wallet (created, step updates, final decision), and this
+    // JOIN previously returned one row per matching audit event -- a single
+    // run with 4 events rendered as 4 duplicate cards in the Swarms UI.
     const rows = db.prepare(
-      'SELECT sr.id, sr.status, sr.human_escalation, sr.created_at, sr.updated_at FROM swarm_runs sr JOIN audit_events ae ON ae.entity_type = \'swarm\' AND ae.entity_id = sr.id AND ae.actor_wallet = ? ORDER BY sr.updated_at DESC LIMIT 50'
+      "SELECT DISTINCT sr.id, sr.status, sr.human_escalation, sr.created_at, sr.updated_at FROM swarm_runs sr JOIN audit_events ae ON ae.entity_type = 'swarm' AND ae.entity_id = sr.id AND ae.actor_wallet = ? ORDER BY sr.updated_at DESC LIMIT 50"
     ).all(wallet);
     return json(res, 200, { ok: true, data: rows });
   }
@@ -259,12 +264,26 @@ async function handle(req, res) {
       input: { worker: { id: worker.id, capabilities: worker.capabilities }, context: context.metadata },
       privateContext: context,
     }));
-    await runSwarm(state, runId, steps, async (step) => ({
-      workerId: step.input.worker.id,
-      capabilities: step.input.worker.capabilities,
-      status: 'declared_not_executed',
-      contextEvidenceCount: step.privateContext.evidence.length,
-    }), { concurrency: 4, adapter: swarmDecisionAdapter });
+    await runSwarm(state, runId, steps, async (step) => {
+      // The built-in "context-worker" now actually answers the caller's
+      // query grounded in their own retrieved private context (see
+      // swarm-context-worker.mjs) instead of declaring capabilities without
+      // doing anything -- the jev judge previously had nothing real to
+      // score, so runs were rejected almost regardless of context quality.
+      // A worker whose capabilities don't include "context" keeps the
+      // original declared-not-executed shape (nothing to ground an answer
+      // in for a capability this route doesn't implement).
+      if (step.input.worker.capabilities.includes('context')) {
+        const result = await runContextWorker(step.privateContext, {});
+        return { workerId: step.input.worker.id, capabilities: step.input.worker.capabilities, ...result, contextEvidenceCount: step.privateContext.evidence.length };
+      }
+      return {
+        workerId: step.input.worker.id,
+        capabilities: step.input.worker.capabilities,
+        status: 'declared_not_executed',
+        contextEvidenceCount: step.privateContext.evidence.length,
+      };
+    }, { concurrency: 4, adapter: swarmDecisionAdapter });
     const finalSteps = state.listSteps(runId);
     const decisionProvider = actualDecisionProvider(finalSteps);
     state.updateRun(runId, { sharedEvidence: { ...state.getRun(runId).sharedEvidence, decisionProvider } });

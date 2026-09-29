@@ -188,7 +188,15 @@ export async function scoreResult(adapter = {}, input = {}) {
 
 export async function noulGate(adapter = {}, { score = 0, threshold = 0.5, ...input } = {}) {
   if (typeof adapter.noul === 'function') {
-    const result = await adapter.noul({ score, threshold, ...input });
+    // adapter.noul(input, options) is a TWO-argument decision-adapter call
+    // (see decision-adapter.mjs's run()): options.threshold is what the
+    // provider actually compares its live confidence against. Passing a
+    // single merged object here left the adapter's `options` at its default
+    // {}, so every threshold check compared against undefined -- always
+    // false -- and noul() reported not-allowed unconditionally regardless of
+    // confidence. This was the root cause of every real swarm run coming
+    // back rejected no matter how good the worker's answer was.
+    const result = await adapter.noul({ score, ...input }, { threshold });
     const status = result?.status ?? (result?.allowed === false || result?.allow === false ? 'rejected' : 'approved');
     return { ...result, status };
   }
@@ -211,11 +219,16 @@ export async function runSwarm(state, runId, steps, worker, { concurrency = 4, a
     const key = step.key ?? step.stepKey;
     try {
       const result = await worker(step, { run: state.getRun(runId), evidence: state.getRun(runId).sharedEvidence });
-      // Decision providers receive explicit, persisted-safe state only; the bounded
-      // private context remains available to the declared worker, not the provider.
-      const decisionState = { goal: run.goal, step: { key, input: step.input }, context: state.getRun(runId).sharedEvidence.context };
-      const score = await scoreResult(adapter, { runId, step, result, state: decisionState, criteria: ['reject', 'approve'] });
-      const gate = await noulGate(adapter, { runId, step, result, score, threshold: effectiveThreshold, state: decisionState, criteria: { true: 'allow', false: 'deny' } });
+      // Decision providers receive explicit, persisted-safe state only: goal,
+      // step input, bounded context metadata, AND the worker's own result --
+      // without the result, the judge has nothing to actually evaluate and
+      // can only guess (reproduced live: a correct, well-grounded answer at
+      // confidence 0.95 still scored 0.16 because the judge never saw it).
+      // The bounded private context text itself remains worker-only, never
+      // sent to the decision provider.
+      const decisionState = { goal: run.goal, step: { key, input: step.input }, result, context: state.getRun(runId).sharedEvidence.context };
+      const score = await scoreResult(adapter, { runId, step, result, state: decisionState, criteria: ['reject', 'approve'], instructions: `Score how well this worker's result actually achieves the stated goal, on a 0-1 scale. Goal: ${run.goal}` });
+      const gate = await noulGate(adapter, { runId, step, result, score, threshold: effectiveThreshold, state: decisionState, criteria: { true: 'allow', false: 'deny' }, instructions: `Given the goal and the worker's result above (state.result), should this step's output be allowed to complete the run? Goal: ${run.goal}. Allow if the result meaningfully and honestly addresses the goal; deny if it is off-topic, fabricated, or fails to address it.` });
       const status = gate.status === 'human_escalation' ? 'human_escalation' : gate.status === 'rejected' ? 'rejected' : 'completed';
       state.upsertStep(runId, step, { status, output: result, score, error: gate.reason ?? null, completedAt: now(), decisionProvider: gate.provider ?? null });
       // Read-modify-write on sharedEvidence, no lock/CAS. This is safe ONLY because
