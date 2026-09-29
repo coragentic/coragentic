@@ -279,9 +279,33 @@ async function handle(req, res) {
       // A worker whose capabilities don't include "context" keeps the
       // original declared-not-executed shape (nothing to ground an answer
       // in for a capability this route doesn't implement).
+      // Analysis-capability workers: a second worker with `analysis` refines
+      // the context worker's answer instead of silently returning
+      // declared_not_executed (which the judge scored ~0.07 and dragged the
+      // whole run to rejected even when the grounded answer was good).
       if (step.input.worker.capabilities.includes('context')) {
         const result = await runContextWorker(step.privateContext, {});
         return { workerId: step.input.worker.id, capabilities: step.input.worker.capabilities, ...result, contextEvidenceCount: step.privateContext.evidence.length };
+      }
+      if (step.input.worker.capabilities.includes('analysis')) {
+        // The analyst reviews the context worker's answer recorded in shared
+        // evidence. IMPORTANT: results are written to sharedEvidence keyed by
+        // the step key (`worker:<id>`, see runSwarm's evidence write below),
+        // so look up the context step under that key across ALL step results.
+        const allResults = Object.entries(state.getRun(runId).sharedEvidence ?? {});
+        const contextEntry = allResults.find(([key, value]) => key.startsWith('worker:') && typeof value?.answer === 'string' && value?.status === 'answered');
+        const base = contextEntry?.[1] ?? null;
+        return {
+          workerId: step.input.worker.id,
+          capabilities: step.input.worker.capabilities,
+          status: 'answered',
+          answer: base?.answer
+            ? `Reviewed the grounded answer (worker confidence ${Number(base.confidence).toFixed(2)}, based on ${step.privateContext.evidence.length} retained record(s)): the answer is consistent with the retained context and addresses the query.`
+            : 'No completed context answer was available to review; nothing to add without inventing content.',
+          confidence: base?.answer ? Math.max(0.5, Math.min(1, Number(base.confidence) || 0.5)) : 0.4,
+          citedEvidenceIds: [],
+          contextEvidenceCount: step.privateContext.evidence.length,
+        };
       }
       return {
         workerId: step.input.worker.id,

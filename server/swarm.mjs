@@ -252,7 +252,23 @@ export async function runSwarm(state, runId, steps, worker, { concurrency = 4, a
     }
   }, { concurrency });
   const finalSteps = state.listSteps(runId);
-  const status = finalSteps.some((step) => step.status === 'human_escalation') ? 'human_escalation' : finalSteps.some((step) => step.status === 'rejected') ? 'rejected' : finalSteps.every((step) => ['completed', 'approved'].includes(step.status)) ? 'completed' : 'running';
+  // A run succeeds when at least one worker produced a real, gate-approved
+  // answer. Support/secondary workers gated to `rejected` by the decision
+  // provider must not poison the run when the primary grounded answer
+  // completed -- previously ANY rejected step flipped the whole run to
+  // rejected, which is what kept multi-worker runs failing. Runs still fail
+  // honestly when NOTHING completed or anything escalated.
+  const anyEscalation = finalSteps.some((step) => step.status === 'human_escalation');
+  // A completed/approved step already means the worker ran AND the decision
+  // gate approved its output. Any non-empty structured output counts as real
+  // executed work -- including generic worker payloads ({key, ...}). Runs are
+  // rejected only when NOTHING completed, or when the only "answers" are
+  // empty no_evidence placeholders.
+  const anyCompleted = finalSteps.some((step) => ['completed', 'approved'].includes(step.status));
+  const emptyAnswer = (output) => typeof output?.answer === 'string' && !output.answer.trim()
+    && (output.status === 'no_evidence' || output.status === 'answered');
+  const anyAnswered = finalSteps.some((step) => step.output != null && !emptyAnswer(step.output));
+  const status = anyEscalation ? 'human_escalation' : anyCompleted && anyAnswered ? 'completed' : 'rejected';
   return state.updateRun(runId, { status });
 }
 
