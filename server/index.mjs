@@ -620,7 +620,7 @@ async function handle(req, res) {
     const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
     if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
     if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
-    const rows = db.prepare('SELECT * FROM agent_runs WHERE agent_id = ? ORDER BY created_at DESC LIMIT 50').all(parts[2]);
+    const rows = db.prepare('SELECT * FROM agent_runs WHERE agent_id = ? AND owner_wallet = ? ORDER BY created_at DESC LIMIT 50').all(parts[2], wallet);
     return json(res, 200, { ok: true, data: rows.map((row) => ({ id: row.id, kind: row.kind, request: row.request, result: JSON.parse(row.result_json), createdAt: row.created_at })) });
   }
   if (req.method === 'POST' && parts[0] === 'v1' && parts[1] === 'agents' && parts[2] && parts[3] === 'think') {
@@ -633,8 +633,13 @@ async function handle(req, res) {
     const request = cleanText(body.request, 4_000);
     if (!request) return json(res, 400, { ok: false, error: 'agent_request_required' });
     const pack = contextPack(db, request, 4_000, { agentId: parts[2], ownerWallet: wallet });
-    const mission = db.prepare('SELECT content FROM agent_memory WHERE agent_id = ? AND memory_key = ?').get(parts[2], 'mission')?.content ?? agent.description;
+    const mission = db.prepare('SELECT content FROM agent_memory WHERE agent_id = ? AND owner_wallet = ? AND memory_key = ?').get(parts[2], wallet, 'mission')?.content ?? agent.description;
     const result = await runAgentBrain({ mission, request, context: pack.text });
+    // Model-generated citations are advisory until checked against the exact
+    // evidence pack used for this run. Never persist or display fabricated
+    // IDs as proof of grounding.
+    const allowedEvidenceIds = new Set(pack.evidence.map((item) => item.id));
+    result.citedEvidenceIds = result.citedEvidenceIds.filter((id) => allowedEvidenceIds.has(id));
     const timestamp = new Date().toISOString();
     const runId = randomUUID();
     db.prepare('INSERT INTO agent_runs (id, agent_id, owner_wallet, kind, request, result_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(runId, parts[2], wallet, 'brain', request, JSON.stringify({ ...result, evidenceCount: pack.evidence.length }), timestamp);
@@ -656,6 +661,11 @@ async function handle(req, res) {
     const agent = db.prepare('SELECT owner_wallet FROM agents WHERE id = ?').get(parts[2]);
     if (!agent) return json(res, 404, { ok: false, error: 'agent_not_found' });
     if (agent.owner_wallet !== wallet) return json(res, 403, { ok: false, error: 'agent_owner_required' });
+    // A custody address is fundable on-chain even before signing exists. Do
+    // not expose new addresses until recovery/withdrawal, rotation and backup
+    // recovery have passed security review; otherwise users can permanently
+    // lock funds. Existing records remain address-only and spend-disabled.
+    if (process.env.CORAGENTIC_CUSTODY_WALLETS_ENABLED !== 'true') return json(res, 503, { ok: false, error: 'custody_recovery_not_ready' });
     const existing = db.prepare('SELECT agent_id, address, policy_json, created_at, updated_at FROM agent_wallets WHERE agent_id = ?').get(parts[2]);
     if (existing) return json(res, 200, { ok: true, data: { address: existing.address, policy: JSON.parse(existing.policy_json), createdAt: existing.created_at, updatedAt: existing.updated_at } });
     if (!process.env.CORAGENTIC_CUSTODY_KEY) return json(res, 503, { ok: false, error: 'custody_not_configured' });
