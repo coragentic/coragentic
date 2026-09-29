@@ -13,6 +13,7 @@ import { buildAgentCard, buildMcpManifest } from './interoperability.mjs';
 import { migrateSwarmSchema, SwarmState, createBoundedContextInput, runSwarm } from './swarm.mjs';
 import { createOpenRouterJevAdapterFromEnv } from './jev-openrouter.mjs';
 import { runContextWorker } from './swarm-context-worker.mjs';
+import { AGENT_TEMPLATE_IDS, starterVaultForTemplate, templateCapabilities } from './agent-templates.mjs';
 import { quoteSwap, previewSwap, swapStatus } from './rh-swap.mjs';
 import { getWorkerReadiness } from './worker-readiness.mjs';
 
@@ -660,15 +661,21 @@ async function handle(req, res) {
     const body = await readBody(req);
     const name = cleanText(body.name, 80);
     const description = cleanText(body.description, 2_000);
+    const template = typeof body.template === 'string' && body.template.trim() ? body.template.trim() : 'blank';
     const services = Array.isArray(body.services) ? body.services.slice(0, 10) : [];
-    const capabilities = Array.isArray(body.capabilities) ? body.capabilities.slice(0, 30).filter((x) => typeof x === 'string').map((x) => x.slice(0, 80)) : [];
+    const requestedCapabilities = Array.isArray(body.capabilities) ? body.capabilities.slice(0, 30).filter((x) => typeof x === 'string').map((x) => x.slice(0, 80)) : [];
     if (!name || !description) return json(res, 400, { ok: false, error: 'name_and_description_required' });
+    if (!AGENT_TEMPLATE_IDS.includes(template)) return json(res, 400, { ok: false, error: 'invalid_agent_template' });
+    const capabilities = requestedCapabilities.length ? requestedCapabilities : templateCapabilities(template);
     const id = `agent_${randomUUID().replaceAll('-', '')}`;
     const timestamp = new Date().toISOString();
+    const starterVault = starterVaultForTemplate(template, { name, description });
     db.prepare(`INSERT INTO agents (id, owner_wallet, name, description, image, services_json, capabilities_json, supported_trust_json, x402_support, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, wallet, name, description, cleanText(body.image, 2_000), JSON.stringify(services), JSON.stringify(capabilities), JSON.stringify(['reputation']), 0, 'draft', timestamp, timestamp);
+    const insertMemory = db.prepare('INSERT INTO agent_memory (id, agent_id, owner_wallet, memory_key, content, tags_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+    for (const entry of starterVault) insertMemory.run(randomUUID(), id, wallet, entry.key, entry.content, JSON.stringify(entry.tags), timestamp, timestamp);
     const row = db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
-    audit(wallet, 'agent', id, 'agent_created', { status: 'draft' });
-    return json(res, 201, { ok: true, data: agentResponse(row), note: 'draft_only_identity_not_registered_onchain' });
+    audit(wallet, 'agent', id, 'agent_created', { status: 'draft', template, starterVaultRecords: starterVault.length });
+    return json(res, 201, { ok: true, data: { ...agentResponse(row), template, starterVaultRecords: starterVault.length }, note: 'draft_only_identity_not_registered_onchain' });
   }
   return json(res, 404, { ok: false, error: 'route_not_found' });
 }
